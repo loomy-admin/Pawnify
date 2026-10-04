@@ -11,16 +11,36 @@ const appUrl =
     ? `https://${process.env.VERCEL_URL}`
     : "http://localhost:3000");
 
-const mysqlPool = mysql.createPool({
-  host: process.env.MYSQL_HOST || "127.0.0.1",
-  port: Number(process.env.MYSQL_PORT || 3306),
-  user: process.env.MYSQL_USER || "root",
-  password: process.env.MYSQL_PASSWORD || "",
-  database: process.env.MYSQL_DATABASE || "pawnify_db",
-  waitForConnections: true,
-  connectionLimit: Number(process.env.DB_POOL_MAX || 10),
-  queueLimit: 0,
-});
+const useSsl =
+  process.env.MYSQL_SSL === "true" ||
+  process.env.MYSQL_HOST?.includes("tidbcloud.com") ||
+  process.env.MYSQL_HOST?.includes("aivencloud.com") ||
+  process.env.DATABASE_URL?.includes("ssl");
+
+const sslConfig = useSsl
+  ? { rejectUnauthorized: process.env.MYSQL_SSL_REJECT_UNAUTHORIZED === "true" }
+  : undefined;
+
+const mysqlPool =
+  process.env.DATABASE_URL && process.env.DATABASE_URL.startsWith("mysql")
+    ? mysql.createPool({
+        uri: process.env.DATABASE_URL,
+        waitForConnections: true,
+        connectionLimit: Number(process.env.DB_POOL_MAX || 10),
+        queueLimit: 0,
+        ssl: sslConfig,
+      })
+    : mysql.createPool({
+        host: process.env.MYSQL_HOST || "127.0.0.1",
+        port: Number(process.env.MYSQL_PORT || 3306),
+        user: process.env.MYSQL_USER || "root",
+        password: process.env.MYSQL_PASSWORD || "",
+        database: process.env.MYSQL_DATABASE || "pawnify_db",
+        waitForConnections: true,
+        connectionLimit: Number(process.env.DB_POOL_MAX || 10),
+        queueLimit: 0,
+        ssl: sslConfig,
+      });
 
 export const auth = betterAuth({
   database: mysqlPool,
