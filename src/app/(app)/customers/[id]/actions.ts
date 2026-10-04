@@ -9,9 +9,8 @@ import {
   checkPanRequired,
 } from "@/lib/services/customers";
 import { kycDocumentSchema } from "@/lib/validation/customer";
-import { KycStatus } from "@prisma/client";
+import { KycStatus, Customer, Loan, KycDocument } from "@/lib/db";
 import { serializeForClient } from "@/lib/serialize";
-
 import { projectLoan, projectPanStatus } from "@/lib/projection";
 
 export async function getCustomerDetailAction(customerId: string) {
@@ -26,7 +25,7 @@ export async function getCustomerDetailAction(customerId: string) {
   const panStatus = await checkPanRequired(customerId);
   const projectedCustomer = {
     ...customer,
-    loans: customer.loans.map((l) => projectLoan(l, auth.calculationMode)),
+    loans: (customer.loans || []).map((l: any) => projectLoan(l, auth.calculationMode)),
   };
   return {
     customer: serializeForClient(projectedCustomer),
@@ -92,8 +91,6 @@ export async function verifyKycDocumentAction(
   }
 }
 
-import { prisma } from "@/lib/db";
-
 export async function updateCustomerDetailsAction(
   customerId: string,
   data: {
@@ -112,9 +109,8 @@ export async function updateCustomerDetailsAction(
   }
 
   try {
-    await prisma.customer.update({
-      where: { id: customerId },
-      data: {
+    await Customer.update(
+      {
         fullName: data.fullName.trim(),
         phone: data.phone.trim(),
         email: data.email?.trim() || null,
@@ -123,7 +119,8 @@ export async function updateCustomerDetailsAction(
         state: data.state.trim(),
         pincode: data.pincode.trim(),
       },
-    });
+      { where: { id: customerId } }
+    );
 
     revalidatePath(`/customers/${customerId}`);
     revalidatePath("/customers");
@@ -144,7 +141,7 @@ export async function deleteCustomerAction(customerId: string) {
   }
 
   try {
-    const totalLoans = await prisma.loan.count({
+    const totalLoans = await Loan.count({
       where: { customerId },
     });
 
@@ -155,8 +152,8 @@ export async function deleteCustomerAction(customerId: string) {
       };
     }
 
-    await prisma.kycDocument.deleteMany({ where: { customerId } });
-    await prisma.customer.delete({ where: { id: customerId } });
+    await KycDocument.destroy({ where: { customerId } });
+    await Customer.destroy({ where: { id: customerId } });
 
     revalidatePath("/customers");
     return { success: true };

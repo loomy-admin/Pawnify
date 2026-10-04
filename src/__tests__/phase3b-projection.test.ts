@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { Prisma } from "@prisma/client";
+import Decimal from "decimal.js";
 import {
   projectMonetaryDecimal,
   projectMonetaryNumber,
@@ -18,7 +18,7 @@ import {
   projectReportsData,
 } from "@/lib/projection";
 
-const Decimal = Prisma.Decimal;
+
 
 describe("Phase 3B: Monetary Projection & Boundary Verification", () => {
   const sampleLoan = {

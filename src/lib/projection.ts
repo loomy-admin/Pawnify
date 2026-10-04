@@ -16,7 +16,7 @@
  *    the server converts back to true amounts (× 2) before calling pure domain services.
  */
 
-import { Prisma } from "@prisma/client";
+import Decimal from "decimal.js";
 import type { CalculationMode } from "@/lib/auth/session";
 import type {
   LoanRegisterResult,
@@ -30,26 +30,27 @@ import type {
   TransactionHistoryResult,
 } from "@/lib/services/reports";
 
-const Decimal = Prisma.Decimal;
+
 const HALF_DECIMAL = new Decimal("0.5");
 const DOUBLE_DECIMAL = new Decimal("2");
 
 export type GenericRecord = Record<string, unknown>;
 
 /**
- * Projects a Prisma.Decimal monetary value based on calculation mode.
+ * Projects a Decimal monetary value based on calculation mode.
  */
 export function projectMonetaryDecimal(
-  value: Prisma.Decimal | null | undefined,
+  value: Decimal | string | number | null | undefined,
   mode: CalculationMode
-): Prisma.Decimal {
+): Decimal {
   if (value === null || value === undefined) {
     return new Decimal(0);
   }
+  const d = value instanceof Decimal ? value : new Decimal(value as any);
   if (mode === "FIFTY_PERCENT") {
-    return value.mul(HALF_DECIMAL);
+    return d.mul(HALF_DECIMAL);
   }
-  return value;
+  return d;
 }
 
 /**
@@ -91,13 +92,14 @@ export function projectMonetaryString(
  * - In FIFTY_PERCENT mode: trueAmount = displayedAmount × 2
  */
 export function invertMonetaryInputDecimal(
-  displayedAmount: Prisma.Decimal,
+  displayedAmount: Decimal | string | number,
   mode: CalculationMode
-): Prisma.Decimal {
+): Decimal {
+  const d = displayedAmount instanceof Decimal ? displayedAmount : new Decimal(displayedAmount as any);
   if (mode === "FIFTY_PERCENT") {
-    return displayedAmount.mul(DOUBLE_DECIMAL);
+    return d.mul(DOUBLE_DECIMAL);
   }
-  return displayedAmount;
+  return d;
 }
 
 export function invertMonetaryInputNumber(
@@ -115,7 +117,7 @@ export function invertMonetaryInputNumber(
  * Only assessedValue is projected.
  * Weights, purity, valuation rate, packet number, storage location remain 100% untouched.
  */
-export function projectLoanItem<T extends { assessedValue: Prisma.Decimal }>(
+export function projectLoanItem<T extends { assessedValue: Decimal }>(
   item: T,
   mode: CalculationMode
 ): T {
@@ -130,7 +132,7 @@ export function projectLoanItem<T extends { assessedValue: Prisma.Decimal }>(
  * Projects a Loan Charge.
  * Only amount is projected.
  */
-export function projectLoanCharge<T extends { amount: Prisma.Decimal }>(
+export function projectLoanCharge<T extends { amount: Decimal }>(
   charge: T,
   mode: CalculationMode
 ): T {
@@ -148,11 +150,11 @@ export function projectLoanCharge<T extends { amount: Prisma.Decimal }>(
  */
 export function projectPayment<
   T extends {
-    amountPaid: Prisma.Decimal;
-    allocatedPrincipal: Prisma.Decimal;
-    allocatedInterest: Prisma.Decimal;
-    allocatedCharges: Prisma.Decimal;
-    remainingPrincipal: Prisma.Decimal;
+    amountPaid: Decimal;
+    allocatedPrincipal: Decimal;
+    allocatedInterest: Decimal;
+    allocatedCharges: Decimal;
+    remainingPrincipal: Decimal;
   }
 >(payment: T, mode: CalculationMode): T {
   if (mode === "NORMAL") return payment;
@@ -172,8 +174,8 @@ export function projectPayment<
  */
 export function projectLedgerEntry<
   T extends {
-    amount: Prisma.Decimal;
-    principalAfter: Prisma.Decimal;
+    amount: Decimal;
+    principalAfter: Decimal;
   }
 >(entry: T, mode: CalculationMode): T {
   if (mode === "NORMAL") return entry;
@@ -189,9 +191,9 @@ export function projectLedgerEntry<
  */
 export function projectInterestSummary<
   T extends {
-    accruedInterest: Prisma.Decimal;
-    dailyInterest: Prisma.Decimal;
-    monthlyInterest: Prisma.Decimal;
+    accruedInterest: Decimal;
+    dailyInterest: Decimal;
+    monthlyInterest: Decimal;
     daysSinceSettled?: number;
   }
 >(summary: T, mode: CalculationMode): T {
@@ -223,59 +225,59 @@ export function projectLoan<T extends GenericRecord>(
   const projected: GenericRecord = { ...loan };
 
   if ("principalAmount" in loan && loan.principalAmount !== undefined) {
-    projected.principalAmount = projectMonetaryDecimal(loan.principalAmount as Prisma.Decimal, mode);
+    projected.principalAmount = projectMonetaryDecimal(loan.principalAmount as Decimal, mode);
   }
   if ("principalOutstanding" in loan && loan.principalOutstanding !== undefined) {
-    projected.principalOutstanding = projectMonetaryDecimal(loan.principalOutstanding as Prisma.Decimal, mode);
+    projected.principalOutstanding = projectMonetaryDecimal(loan.principalOutstanding as Decimal, mode);
   }
   if ("totalAssessedValue" in loan && loan.totalAssessedValue !== undefined) {
-    projected.totalAssessedValue = projectMonetaryDecimal(loan.totalAssessedValue as Prisma.Decimal, mode);
+    projected.totalAssessedValue = projectMonetaryDecimal(loan.totalAssessedValue as Decimal, mode);
   }
   if ("eligibleAmount" in loan && loan.eligibleAmount !== undefined) {
-    projected.eligibleAmount = projectMonetaryDecimal(loan.eligibleAmount as Prisma.Decimal, mode);
+    projected.eligibleAmount = projectMonetaryDecimal(loan.eligibleAmount as Decimal, mode);
   }
   if ("maxEligibleLoan" in loan && loan.maxEligibleLoan !== undefined) {
-    projected.maxEligibleLoan = projectMonetaryDecimal(loan.maxEligibleLoan as Prisma.Decimal, mode);
+    projected.maxEligibleLoan = projectMonetaryDecimal(loan.maxEligibleLoan as Decimal, mode);
   }
   if ("totalDue" in loan && loan.totalDue !== undefined) {
-    projected.totalDue = projectMonetaryDecimal(loan.totalDue as Prisma.Decimal, mode);
+    projected.totalDue = projectMonetaryDecimal(loan.totalDue as Decimal, mode);
   }
 
   if (Array.isArray(loan.items)) {
-    projected.items = (loan.items as Array<{ assessedValue: Prisma.Decimal }>).map((it) =>
+    projected.items = (loan.items as Array<{ assessedValue: Decimal }>).map((it) =>
       projectLoanItem(it, mode)
     );
   }
   if (Array.isArray(loan.payments)) {
     projected.payments = (
       loan.payments as Array<{
-        amountPaid: Prisma.Decimal;
-        allocatedPrincipal: Prisma.Decimal;
-        allocatedInterest: Prisma.Decimal;
-        allocatedCharges: Prisma.Decimal;
-        remainingPrincipal: Prisma.Decimal;
+        amountPaid: Decimal;
+        allocatedPrincipal: Decimal;
+        allocatedInterest: Decimal;
+        allocatedCharges: Decimal;
+        remainingPrincipal: Decimal;
       }>
     ).map((p) => projectPayment(p, mode));
   }
   if (Array.isArray(loan.charges)) {
-    projected.charges = (loan.charges as Array<{ amount: Prisma.Decimal }>).map((c) =>
+    projected.charges = (loan.charges as Array<{ amount: Decimal }>).map((c) =>
       projectLoanCharge(c, mode)
     );
   }
   if (Array.isArray(loan.transactions)) {
     projected.transactions = (
       loan.transactions as Array<{
-        amount: Prisma.Decimal;
-        principalAfter: Prisma.Decimal;
+        amount: Decimal;
+        principalAfter: Decimal;
       }>
     ).map((t) => projectLedgerEntry(t, mode));
   }
   if (loan.interestSummary && typeof loan.interestSummary === "object") {
     projected.interestSummary = projectInterestSummary(
       loan.interestSummary as {
-        accruedInterest: Prisma.Decimal;
-        dailyInterest: Prisma.Decimal;
-        monthlyInterest: Prisma.Decimal;
+        accruedInterest: Decimal;
+        dailyInterest: Decimal;
+        monthlyInterest: Decimal;
         daysElapsed?: number;
       },
       mode
@@ -323,19 +325,19 @@ export function projectDashboardStats<T extends GenericRecord>(
         ACTIVE: lss.ACTIVE && typeof lss.ACTIVE === "object"
           ? {
               count: (lss.ACTIVE as { count: number }).count,
-              amount: projectMonetaryDecimal((lss.ACTIVE as { amount: Prisma.Decimal }).amount, mode),
+              amount: projectMonetaryDecimal((lss.ACTIVE as { amount: Decimal }).amount, mode),
             }
           : undefined,
         OVERDUE: lss.OVERDUE && typeof lss.OVERDUE === "object"
           ? {
               count: (lss.OVERDUE as { count: number }).count,
-              amount: projectMonetaryDecimal((lss.OVERDUE as { amount: Prisma.Decimal }).amount, mode),
+              amount: projectMonetaryDecimal((lss.OVERDUE as { amount: Decimal }).amount, mode),
             }
           : undefined,
         CLOSED: lss.CLOSED && typeof lss.CLOSED === "object"
           ? {
               count: (lss.CLOSED as { count: number }).count,
-              amount: projectMonetaryDecimal((lss.CLOSED as { amount: Prisma.Decimal }).amount, mode),
+              amount: projectMonetaryDecimal((lss.CLOSED as { amount: Decimal }).amount, mode),
             }
           : undefined,
       }
@@ -344,35 +346,35 @@ export function projectDashboardStats<T extends GenericRecord>(
   const collectionsSummary = stats.collectionsSummary && typeof stats.collectionsSummary === "object"
     ? {
         ...(stats.collectionsSummary as GenericRecord),
-        totalCollected: projectMonetaryDecimal((stats.collectionsSummary as { totalCollected: Prisma.Decimal }).totalCollected, mode),
-        principalCollected: projectMonetaryDecimal((stats.collectionsSummary as { principalCollected: Prisma.Decimal }).principalCollected, mode),
-        interestCollected: projectMonetaryDecimal((stats.collectionsSummary as { interestCollected: Prisma.Decimal }).interestCollected, mode),
-        chargesCollected: projectMonetaryDecimal((stats.collectionsSummary as { chargesCollected: Prisma.Decimal }).chargesCollected, mode),
+        totalCollected: projectMonetaryDecimal((stats.collectionsSummary as { totalCollected: Decimal }).totalCollected, mode),
+        principalCollected: projectMonetaryDecimal((stats.collectionsSummary as { principalCollected: Decimal }).principalCollected, mode),
+        interestCollected: projectMonetaryDecimal((stats.collectionsSummary as { interestCollected: Decimal }).interestCollected, mode),
+        chargesCollected: projectMonetaryDecimal((stats.collectionsSummary as { chargesCollected: Decimal }).chargesCollected, mode),
       }
     : stats.collectionsSummary;
 
   const disbursementSummary = stats.disbursementSummary && typeof stats.disbursementSummary === "object"
     ? {
         ...(stats.disbursementSummary as GenericRecord),
-        totalDisbursed: projectMonetaryDecimal((stats.disbursementSummary as { totalDisbursed: Prisma.Decimal }).totalDisbursed, mode),
+        totalDisbursed: projectMonetaryDecimal((stats.disbursementSummary as { totalDisbursed: Decimal }).totalDisbursed, mode),
       }
     : stats.disbursementSummary;
 
   const portfolioSummary = stats.portfolioSummary && typeof stats.portfolioSummary === "object"
     ? {
         ...(stats.portfolioSummary as GenericRecord),
-        totalPrincipalDisbursed: projectMonetaryDecimal((stats.portfolioSummary as { totalPrincipalDisbursed: Prisma.Decimal }).totalPrincipalDisbursed, mode),
-        totalPrincipalOutstanding: projectMonetaryDecimal((stats.portfolioSummary as { totalPrincipalOutstanding: Prisma.Decimal }).totalPrincipalOutstanding, mode),
-        totalAccruedInterest: projectMonetaryDecimal((stats.portfolioSummary as { totalAccruedInterest: Prisma.Decimal }).totalAccruedInterest, mode),
-        totalExposure: projectMonetaryDecimal((stats.portfolioSummary as { totalExposure: Prisma.Decimal }).totalExposure, mode),
+        totalPrincipalDisbursed: projectMonetaryDecimal((stats.portfolioSummary as { totalPrincipalDisbursed: Decimal }).totalPrincipalDisbursed, mode),
+        totalPrincipalOutstanding: projectMonetaryDecimal((stats.portfolioSummary as { totalPrincipalOutstanding: Decimal }).totalPrincipalOutstanding, mode),
+        totalAccruedInterest: projectMonetaryDecimal((stats.portfolioSummary as { totalAccruedInterest: Decimal }).totalAccruedInterest, mode),
+        totalExposure: projectMonetaryDecimal((stats.portfolioSummary as { totalExposure: Decimal }).totalExposure, mode),
       }
     : stats.portfolioSummary;
 
   const recentActivity = Array.isArray(stats.recentActivity)
     ? (stats.recentActivity as GenericRecord[]).map((e) => ({
         ...e,
-        amount: projectMonetaryDecimal(e.amount as Prisma.Decimal, mode),
-        principalAfter: projectMonetaryDecimal(e.principalAfter as Prisma.Decimal, mode),
+        amount: projectMonetaryDecimal(e.amount as Decimal, mode),
+        principalAfter: projectMonetaryDecimal(e.principalAfter as Decimal, mode),
       }))
     : stats.recentActivity;
 

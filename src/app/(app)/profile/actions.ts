@@ -1,7 +1,7 @@
 "use server";
 
 import { requireSession } from "@/lib/auth/session";
-import { prisma } from "@/lib/db";
+import { User } from "@/lib/db";
 import { revalidatePath } from "next/cache";
 
 export async function updateProfileNameAction(formData: FormData) {
@@ -14,10 +14,10 @@ export async function updateProfileNameAction(formData: FormData) {
       return { success: false, error: "Name must be at least 2 characters long" };
     }
 
-    await prisma.user.update({
-      where: { id: userId },
-      data: { name: name.trim() },
-    });
+    await User.update(
+      { name: name.trim() },
+      { where: { id: userId } }
+    );
 
     revalidatePath("/profile");
     revalidatePath("/dashboard");
@@ -33,10 +33,10 @@ export async function updateProfileAvatarAction(avatarUrl: string) {
     const session = await requireSession();
     const userId = (session.user as unknown as { id: string }).id;
 
-    await prisma.user.update({
-      where: { id: userId },
-      data: { image: avatarUrl },
-    });
+    await User.update(
+      { image: avatarUrl },
+      { where: { id: userId } }
+    );
 
     revalidatePath("/profile");
     revalidatePath("/dashboard");

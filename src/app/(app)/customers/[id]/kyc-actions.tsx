@@ -14,7 +14,7 @@ import {
   AlertCircle,
   FileText,
 } from "lucide-react";
-import { KycStatus } from "@prisma/client";
+import { KycStatus } from "@/lib/db/types";
 
 interface KycActionsProps {
   customerId: string;

@@ -2,8 +2,6 @@
  * Payment Service — §6.4
  *
  * Implements the payment allocation waterfall within an atomic DB transaction.
- * Every payment write is one atomic prisma.$transaction — a partially-applied
- * payment is a data-integrity incident, not a bug (Non-Negotiable #2).
  *
  * Waterfall order:
  *   1. Outstanding charges (oldest first)
@@ -13,16 +11,21 @@
  * Overpayment beyond total outstanding is rejected, not silently dropped.
  */
 
-import { Prisma, PaymentMode } from "@prisma/client";
+import Decimal from "decimal.js";
 import { differenceInCalendarDays } from "date-fns";
-import { prisma, runSerializable } from "@/lib/db";
+import type { Transaction } from "sequelize";
+import {
+  Loan,
+  LoanCharge,
+  Payment,
+  Op,
+  runTransaction,
+  PaymentMode,
+} from "@/lib/db";
 import { debugLog } from "@/lib/debug";
 import { computeAccruedInterest } from "./interest";
 import { writeLedgerEntry } from "@/lib/ledger-writer";
 import { resolveCounterCashAccount } from "@/lib/services/account-resolver";
-
-const Decimal = Prisma.Decimal;
-type Decimal = Prisma.Decimal;
 
 export interface PaymentAllocation {
   allocatedCharges: Decimal;
@@ -42,40 +45,49 @@ export interface PaymentResult {
 /**
  * Generate a receipt number: REC-YYYYMMDD-XXXXX
  */
-async function generateReceiptNumber(tx: Prisma.TransactionClient): Promise<string> {
+async function generateReceiptNumber(transaction?: Transaction): Promise<string> {
   const today = new Date();
   const dateStr = today.toISOString().slice(0, 10).replace(/-/g, "");
-  const count = await tx.payment.count({
+  const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const count = await Payment.count({
     where: {
       createdAt: {
-        gte: new Date(today.getFullYear(), today.getMonth(), today.getDate()),
+        [Op.gte]: startOfDay,
       },
     },
+    transaction,
   });
   return `REC-${dateStr}-${String(count + 1).padStart(5, "0")}`;
 }
 
 /**
  * Preview the allocation waterfall without persisting anything.
- * Used to show the breakdown before the user confirms payment.
  */
 export async function previewPaymentAllocation(
   loanId: string,
   amountPaid: string | number,
   asOfDate: Date = new Date()
 ): Promise<PaymentAllocation & { accruedInterest: Decimal; totalDue: Decimal }> {
-  const loan = await prisma.loan.findUnique({
-    where: { id: loanId },
-    include: {
-      charges: {
+  const loanInstance = await Loan.findByPk(loanId, {
+    include: [
+      {
+        model: LoanCharge,
+        as: "charges",
         where: { isSettled: false },
-        orderBy: { createdAt: "asc" },
+        required: false,
       },
-    },
+    ],
   });
 
-  if (!loan) throw new Error("Loan not found");
-  if (loan.status !== "ACTIVE") throw new Error("Loan is not active");
+  if (!loanInstance) throw new Error("Loan not found");
+  if (loanInstance.status !== "ACTIVE") throw new Error("Loan is not active");
+
+  const charges: LoanCharge[] = (loanInstance as any).charges || [];
+  charges.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+  const principalOutstanding = new Decimal(loanInstance.principalOutstanding);
+  const interestRateMonthly = new Decimal(loanInstance.interestRateMonthly);
+  const lastSettledDate = new Date(loanInstance.lastSettledDate);
 
   const amount = new Decimal(amountPaid);
   let remaining = amount;
@@ -83,24 +95,25 @@ export async function previewPaymentAllocation(
   // 1. Charges
   let allocatedCharges = new Decimal(0);
   const chargeDetails: PaymentAllocation["chargeDetails"] = [];
-  for (const charge of loan.charges) {
+  for (const charge of charges) {
     if (remaining.lte(new Decimal(0))) break;
-    const pay = Decimal.min(remaining, charge.amount);
+    const chargeAmount = new Decimal(charge.amount);
+    const pay = Decimal.min(remaining, chargeAmount);
     allocatedCharges = allocatedCharges.plus(pay);
     remaining = remaining.minus(pay);
     chargeDetails.push({
       chargeId: charge.id,
       amount: pay,
-      settled: pay.gte(charge.amount),
+      settled: pay.gte(chargeAmount),
     });
   }
 
   // 2. Interest
   const accruedInterest = computeAccruedInterest(
     {
-      principalOutstanding: loan.principalOutstanding,
-      interestRateMonthly: loan.interestRateMonthly,
-      lastSettledDate: loan.lastSettledDate,
+      principalOutstanding,
+      interestRateMonthly,
+      lastSettledDate,
     },
     asOfDate
   );
@@ -108,13 +121,13 @@ export async function previewPaymentAllocation(
   remaining = remaining.minus(allocatedInterest);
 
   // 3. Principal
-  const allocatedPrincipal = Decimal.min(remaining, loan.principalOutstanding);
+  const allocatedPrincipal = Decimal.min(remaining, principalOutstanding);
   remaining = remaining.minus(allocatedPrincipal);
 
-  const remainingPrincipal = loan.principalOutstanding.minus(allocatedPrincipal);
+  const remainingPrincipal = principalOutstanding.minus(allocatedPrincipal);
 
-  const totalCharges = loan.charges.reduce((sum, c) => sum.plus(c.amount), new Decimal(0));
-  const totalDue = totalCharges.plus(accruedInterest).plus(loan.principalOutstanding);
+  const totalCharges = charges.reduce((sum, c) => sum.plus(new Decimal(c.amount)), new Decimal(0));
+  const totalDue = totalCharges.plus(accruedInterest).plus(principalOutstanding);
 
   return {
     allocatedCharges,
@@ -129,7 +142,6 @@ export async function previewPaymentAllocation(
 
 /**
  * Record a payment with atomic waterfall allocation.
- * ALL mutations happen inside a single prisma.$transaction.
  */
 export async function recordPayment(
   loanId: string,
@@ -147,19 +159,28 @@ export async function recordPayment(
 
   debugLog("payments", `recordPayment: loan=${loanId} amount=${amount.toString()} mode=${mode}`);
 
-  return await runSerializable(async (tx) => {
-    const loan = await tx.loan.findUnique({
-      where: { id: loanId },
-      include: {
-        charges: {
+  return await runTransaction(async (t) => {
+    const loanInstance = await Loan.findByPk(loanId, {
+      include: [
+        {
+          model: LoanCharge,
+          as: "charges",
           where: { isSettled: false },
-          orderBy: { createdAt: "asc" },
+          required: false,
         },
-      },
+      ],
+      transaction: t,
     });
 
-    if (!loan) throw new Error("Loan not found");
-    if (loan.status !== "ACTIVE") throw new Error("Loan is not active");
+    if (!loanInstance) throw new Error("Loan not found");
+    if (loanInstance.status !== "ACTIVE") throw new Error("Loan is not active");
+
+    const charges: LoanCharge[] = (loanInstance as any).charges || [];
+    charges.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+    const principalOutstanding = new Decimal(loanInstance.principalOutstanding);
+    const interestRateMonthly = new Decimal(loanInstance.interestRateMonthly);
+    const lastSettledDate = new Date(loanInstance.lastSettledDate);
 
     let remaining = amount;
 
@@ -167,30 +188,28 @@ export async function recordPayment(
     let allocatedCharges = new Decimal(0);
     const chargeDetails: PaymentAllocation["chargeDetails"] = [];
 
-    for (const charge of loan.charges) {
+    for (const charge of charges) {
       if (remaining.lte(new Decimal(0))) break;
 
-      const pay = Decimal.min(remaining, charge.amount);
+      const chargeAmount = new Decimal(charge.amount);
+      const pay = Decimal.min(remaining, chargeAmount);
       allocatedCharges = allocatedCharges.plus(pay);
       remaining = remaining.minus(pay);
 
-      const settled = pay.gte(charge.amount);
+      const settled = pay.gte(chargeAmount);
       chargeDetails.push({ chargeId: charge.id, amount: pay, settled });
 
       if (settled) {
-        await tx.loanCharge.update({
-          where: { id: charge.id },
-          data: { isSettled: true },
-        });
+        await charge.update({ isSettled: true }, { transaction: t });
       }
     }
 
     // ===== 2. Accrued interest =====
     const accruedInterest = computeAccruedInterest(
       {
-        principalOutstanding: loan.principalOutstanding,
-        interestRateMonthly: loan.interestRateMonthly,
-        lastSettledDate: loan.lastSettledDate,
+        principalOutstanding,
+        interestRateMonthly,
+        lastSettledDate,
       },
       asOfDate
     );
@@ -198,7 +217,7 @@ export async function recordPayment(
     remaining = remaining.minus(allocatedInterest);
 
     // ===== 3. Principal =====
-    const allocatedPrincipal = Decimal.min(remaining, loan.principalOutstanding);
+    const allocatedPrincipal = Decimal.min(remaining, principalOutstanding);
     remaining = remaining.minus(allocatedPrincipal);
 
     // ===== Reject overpayment =====
@@ -211,17 +230,14 @@ export async function recordPayment(
     }
 
     // ===== Update loan state =====
-    const newPrincipalOutstanding = loan.principalOutstanding.minus(allocatedPrincipal);
+    const newPrincipalOutstanding = principalOutstanding.minus(allocatedPrincipal);
 
-    // Only advance the interest clock by the fraction of accrued interest that was
-    // actually paid — advancing it fully regardless would silently forgive any
-    // interest left unpaid because charges/allocatedInterest capped the payment.
-    const daysElapsed = differenceInCalendarDays(asOfDate, loan.lastSettledDate);
+    const daysElapsed = differenceInCalendarDays(asOfDate, lastSettledDate);
     let newLastSettledDate = asOfDate;
     if (daysElapsed > 0 && accruedInterest.gt(0) && allocatedInterest.lt(accruedInterest)) {
       const paidDays = allocatedInterest.div(accruedInterest).times(daysElapsed);
       newLastSettledDate = new Date(
-        loan.lastSettledDate.getTime() + paidDays.toNumber() * 24 * 60 * 60 * 1000
+        lastSettledDate.getTime() + paidDays.toNumber() * 24 * 60 * 60 * 1000
       );
       debugLog(
         "payments",
@@ -229,35 +245,36 @@ export async function recordPayment(
       );
     }
 
-    await tx.loan.update({
-      where: { id: loanId },
-      data: {
-        principalOutstanding: newPrincipalOutstanding,
+    await loanInstance.update(
+      {
+        principalOutstanding: newPrincipalOutstanding.toString(),
         lastSettledDate: newLastSettledDate,
       },
-    });
+      { transaction: t }
+    );
 
     // ===== Create Payment record =====
-    const receiptNumber = await generateReceiptNumber(tx);
+    const receiptNumber = await generateReceiptNumber(t);
 
-    const payment = await tx.payment.create({
-      data: {
+    const payment = await Payment.create(
+      {
         loanId,
         receiptNumber,
         paymentDate: asOfDate,
-        amountPaid: amount,
-        mode,
-        allocatedCharges,
-        allocatedInterest,
-        allocatedPrincipal,
+        amountPaid: amount.toString(),
+        mode: mode as any,
+        allocatedCharges: allocatedCharges.toString(),
+        allocatedInterest: allocatedInterest.toString(),
+        allocatedPrincipal: allocatedPrincipal.toString(),
         collectedById,
-        notes,
+        notes: notes || null,
       },
-    });
+      { transaction: t }
+    );
 
-    // ===== Create LedgerEntry (account-aware Counter Cash posting) =====
-    const counterCashAccountId = await resolveCounterCashAccount(tx);
-    await writeLedgerEntry(tx, {
+    // ===== Create LedgerEntry =====
+    const counterCashAccountId = await resolveCounterCashAccount(t);
+    await writeLedgerEntry(t, {
       loanId,
       type: "PAYMENT",
       amount,
@@ -281,3 +298,77 @@ export async function recordPayment(
     };
   });
 }
+
+/**
+ * Reverse a posted payment.
+ * Implements Function 13 of Pawn Broker Operations:
+ * Never hard-delete financial records; create a linked REVERSAL audit record.
+ */
+export async function reversePayment(
+  paymentId: string,
+  reversedById: string,
+  reason: string
+) {
+  if (!reason || !reason.trim()) {
+    throw new Error("Reversal reason is required");
+  }
+
+  return await runTransaction(async (t) => {
+    const payment = await Payment.findByPk(paymentId, { transaction: t });
+    if (!payment) throw new Error("Payment not found");
+    if (payment.isReversed) {
+      throw new Error("This payment has already been reversed");
+    }
+
+    const loan = await Loan.findByPk(payment.loanId, { transaction: t });
+    if (!loan) throw new Error("Associated loan not found");
+
+    const now = new Date();
+    const allocatedPrincipal = new Decimal(payment.allocatedPrincipal);
+    const newPrincipal = new Decimal(loan.principalOutstanding).plus(allocatedPrincipal);
+
+    // 1. Mark payment as reversed
+    await payment.update(
+      {
+        isReversed: true,
+        reversedAt: now,
+        reversedById,
+        reversalReason: reason.trim(),
+      },
+      { transaction: t }
+    );
+
+    // 2. Restore loan principal and reopen loan if it was closed
+    const loanUpdates: any = {
+      principalOutstanding: newPrincipal.toString(),
+    };
+    if (loan.status === "CLOSED") {
+      loanUpdates.status = "ACTIVE";
+      loanUpdates.closedAt = null;
+      loanUpdates.closedById = null;
+    }
+    await loan.update(loanUpdates, { transaction: t });
+
+    // 3. Write linked REVERSAL ledger entry
+    const counterCashAccountId = await resolveCounterCashAccount(t);
+    await writeLedgerEntry(t, {
+      loanId: loan.id,
+      type: "REVERSAL",
+      amount: new Decimal(payment.amountPaid),
+      principalAfter: newPrincipal,
+      referenceId: payment.id,
+      accountId: counterCashAccountId,
+      description: `Reversal of Payment ${payment.receiptNumber} (₹${payment.amountPaid}) — Reason: ${reason.trim()}`,
+    });
+
+    debugLog("payments", `Payment ${payment.receiptNumber} reversed: ${reason}`);
+
+    return {
+      paymentId: payment.id,
+      receiptNumber: payment.receiptNumber,
+      reversedAt: now,
+      restoredPrincipal: newPrincipal,
+    };
+  });
+}
+

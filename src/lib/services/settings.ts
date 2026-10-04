@@ -1,39 +1,39 @@
 /**
- * Settings Service — AppSetting CRUD
+ * Settings Service — AppSetting CRUD (Sequelize MySQL)
  * Business-rule knobs that should never be hardcoded in application code.
  */
 
-import { prisma } from "@/lib/db";
+import { AppSetting, sequelize } from "@/lib/db";
 
 export async function getSetting(key: string): Promise<string | null> {
-  const setting = await prisma.appSetting.findUnique({ where: { key } });
+  const setting = await AppSetting.findByPk(key);
   return setting?.value ?? null;
 }
 
 export async function getSettings() {
-  return await prisma.appSetting.findMany({
-    orderBy: { key: "asc" },
+  const settings = await AppSetting.findAll({
+    order: [["key", "ASC"]],
   });
+  return settings.map((s) => s.toJSON());
 }
 
 export async function updateSetting(key: string, value: string) {
-  return await prisma.appSetting.upsert({
-    where: { key },
-    update: { value },
-    create: { key, value },
-  });
+  const [setting] = await AppSetting.upsert({ key, value });
+  return setting.toJSON();
 }
 
 export async function updateSettings(settings: Array<{ key: string; value: string }>) {
-  return await prisma.$transaction(
-    settings.map((s) =>
-      prisma.appSetting.upsert({
-        where: { key: s.key },
-        update: { value: s.value },
-        create: { key: s.key, value: s.value },
-      })
-    )
-  );
+  return await sequelize.transaction(async (t) => {
+    const results = [];
+    for (const s of settings) {
+      const [res] = await AppSetting.upsert(
+        { key: s.key, value: s.value },
+        { transaction: t }
+      );
+      results.push(res.toJSON());
+    }
+    return results;
+  });
 }
 
 /**

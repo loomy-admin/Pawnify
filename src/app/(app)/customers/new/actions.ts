@@ -37,7 +37,7 @@ export async function createCustomerAction(formData: unknown) {
     );
 
     revalidatePath("/customers");
-    return { success: true, customerId: customer.id };
+    return { success: true, customerId: customer?.id || "" };
   } catch (err: unknown) {
     console.error("Failed to create customer:", err);
     return {

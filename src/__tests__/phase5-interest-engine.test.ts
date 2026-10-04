@@ -13,7 +13,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { Prisma } from "@prisma/client";
+import Decimal from "decimal.js";
 import {
   computeDailyInterest,
   computeMonthlyInterest,
@@ -23,7 +23,7 @@ import {
 } from "../lib/services/interest";
 import { projectInterestSummary } from "@/lib/projection";
 
-const D = Prisma.Decimal;
+const D = Decimal;
 
 // ──────────────────────────────────────────────────────────
 // HELPERS
@@ -167,7 +167,7 @@ describe("Phase 5 §2 — Formula verification (Actual/365 Simple Interest)", ()
 // §3 — DECIMAL PRECISION
 // ──────────────────────────────────────────────────────────
 
-describe("Phase 5 §3 — Decimal precision (Prisma.Decimal, no floating-point)", () => {
+describe("Phase 5 §3 — Decimal precision (Decimal, no floating-point)", () => {
   it("D1: principal 101.25 — exact result", () => {
     const base = new Date("2026-01-01T00:00:00Z");
     const loan = makeLoan("101.25", "1.5", base);

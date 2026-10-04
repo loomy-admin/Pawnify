@@ -1,13 +1,11 @@
 /**
- * Production Admin Bootstrap Script for Pawnify
+ * Production Admin Bootstrap Script for Pawnify (Pure Sequelize MySQL)
  *
  * Creates the initial ADMIN user safely without touching existing data.
- * Usage:
- *   ADMIN_PHONE="9876543210" ADMIN_EMAIL="admin@yourdomain.com" ADMIN_PASSWORD="your-strong-password" ADMIN_HIDDEN_PASSWORD="optional-hidden-password" npx tsx scripts/bootstrap-admin.ts
  */
 
 import "dotenv/config";
-import { prisma } from "../src/lib/db";
+import { User, Op } from "../src/lib/db";
 import { auth } from "../src/lib/auth";
 import { hashPassword } from "better-auth/crypto";
 import { normalizeIndianMobile, isValidIndianMobile } from "../src/lib/auth/mobile-plugin";
@@ -28,9 +26,9 @@ async function main() {
 
   console.log(`Checking for existing user with phone ${normalizedPhone} or email ${email}...`);
 
-  const existing = await prisma.user.findFirst({
+  const existing = await User.findOne({
     where: {
-      OR: [{ phone: normalizedPhone }, { email }],
+      [Op.or]: [{ phone: normalizedPhone }, { email }],
     },
   });
 
@@ -40,15 +38,15 @@ async function main() {
     if (hiddenPassword) {
       hiddenHash = await hashPassword(hiddenPassword);
     }
-    await prisma.user.update({
-      where: { id: existing.id },
-      data: {
+    await User.update(
+      {
         role: "ADMIN",
         isActive: true,
         emailVerified: true,
         hiddenPasswordHash: hiddenHash,
       },
-    });
+      { where: { id: existing.id } }
+    );
     console.log(`✅ User ${existing.email} updated to ADMIN successfully.`);
     return;
   }
@@ -66,16 +64,16 @@ async function main() {
     },
   });
 
-  await prisma.user.update({
-    where: { id: res.user.id },
-    data: {
+  await User.update(
+    {
       role: "ADMIN",
       emailVerified: true,
       isActive: true,
       phone: normalizedPhone,
       hiddenPasswordHash: hiddenHash,
     },
-  });
+    { where: { id: res.user.id } }
+  );
 
   console.log(`✅ Admin user successfully bootstrapped!`);
   console.log(`   Email: ${email}`);
@@ -87,7 +85,4 @@ main()
   .catch((e) => {
     console.error("❌ Failed to bootstrap admin:", e);
     process.exit(1);
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
   });

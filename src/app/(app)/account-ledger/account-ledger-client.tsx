@@ -157,7 +157,7 @@ export function AccountLedgerClient() {
         if (!isMounted) return;
         setAccounts(accs as LedgerAccount[]);
         if (!selectedAccountId && accs.length > 0) {
-          const defaultAcc = accs.find((a: LedgerAccount) => a.code === "CASH-01") || accs[0];
+          const defaultAcc = accs.find((a: LedgerAccount) => /cash|counter/i.test(`${a.code} ${a.name}`)) || accs[0];
           setSelectedAccountId(defaultAcc.id);
         }
       })

@@ -4,7 +4,7 @@ import React, { Suspense } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Plus, Search } from "lucide-react";
-import { MetalType } from "@prisma/client";
+import { MetalType } from "@/lib/db/types";
 import { LoansTable, LoanRowData } from "./loans-table";
 import { useGetLoansQuery } from "@/lib/redux/api/loansApi";
 
@@ -44,7 +44,7 @@ function LoansListContent() {
       phone: l.customer.phone,
     },
     customerId: l.customerId,
-    items: l.items.map((i) => ({ metalType: i.metalType })),
+    items: (l.items || []).map((i: any) => ({ metalType: i.metalType })),
     totalAssessedValue: l.totalAssessedValue,
     ltvPercent: l.ltvPercent,
     principalOutstanding: l.principalOutstanding,

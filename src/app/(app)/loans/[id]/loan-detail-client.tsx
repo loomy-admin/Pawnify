@@ -65,10 +65,10 @@ export function LoanDetailClient({ id, isAdmin }: LoanDetailClientProps) {
     }).format(new Date(dateString));
   };
 
-  const isReleased = loan.items.every((i) => i.releasedAt !== null);
-  const unsettledCharges = loan.charges
-    .filter((c) => !c.isSettled)
-    .reduce((acc, c) => acc + parseFloat(c.amount.toString()), 0);
+  const isReleased = (loan.items || []).every((i: any) => i.releasedAt !== null);
+  const unsettledCharges = (loan.charges || [])
+    .filter((c: any) => !c.isSettled)
+    .reduce((acc: number, c: any) => acc + parseFloat(c.amount.toString()), 0);
 
   const principalOutstanding = parseFloat(loan.principalOutstanding.toString());
   const accruedInterest = parseFloat(loan.interestSummary.accruedInterest.toString());
@@ -216,7 +216,7 @@ export function LoanDetailClient({ id, isAdmin }: LoanDetailClientProps) {
                   </tr>
                 </thead>
                 <tbody>
-                  {loan.items.map((item) => (
+                  {(loan.items || []).map((item: any) => (
                     <tr key={item.id}>
                       <td>
                         <div className="font-semibold text-(--text-primary) text-sm">
@@ -303,7 +303,7 @@ export function LoanDetailClient({ id, isAdmin }: LoanDetailClientProps) {
                     </tr>
                   </thead>
                   <tbody>
-                    {loan.payments.map((pmt) => (
+                    {(loan.payments || []).map((pmt: any) => (
                       <tr key={pmt.id}>
                         <td>
                           <div className="font-mono font-bold text-xs text-(--accent)">

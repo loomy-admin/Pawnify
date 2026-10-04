@@ -2,7 +2,7 @@
 
 import { checkAuth } from "@/lib/auth/session";
 import { getAccountLedger, AccountLedgerFilter } from "@/lib/services/account-ledger";
-import { prisma } from "@/lib/db";
+import { AccountMaster } from "@/lib/db";
 import { serializeForClient } from "@/lib/serialize";
 
 /**
@@ -29,16 +29,10 @@ export async function listAccountsForLedgerSelectorAction() {
     throw new Error(auth.error);
   }
 
-  const accounts = await prisma.accountMaster.findMany({
-    orderBy: [{ isActive: "desc" }, { code: "asc" }],
-    select: {
-      id: true,
-      code: true,
-      name: true,
-      type: true,
-      isActive: true,
-    },
+  const accounts = await AccountMaster.findAll({
+    order: [["isActive", "DESC"], ["code", "ASC"]],
+    attributes: ["id", "code", "name", "type", "isActive"],
   });
 
-  return serializeForClient(accounts);
+  return serializeForClient(accounts.map((a) => a.toJSON()));
 }

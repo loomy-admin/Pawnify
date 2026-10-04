@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
-import { prisma } from "@/lib/db";
+import { AccountMaster, User, Loan, LedgerEntry, Op } from "@/lib/db";
+import Decimal from "decimal.js";
 import {
   createAccount,
   updateAccount,
@@ -18,7 +19,7 @@ import {
 } from "@/app/(app)/admin/accounts/actions";
 import { computeAccruedInterest, computeDailyInterest } from "@/lib/services/interest";
 import { projectLedgerEntry } from "@/lib/projection";
-import { Prisma } from "@prisma/client";
+
 
 // Mock auth session helpers for testing server action RBAC
 vi.mock("@/lib/auth/session", () => ({
@@ -44,11 +45,7 @@ describe("Phase 6: Account Master Foundation", () => {
   // Cleanup created test accounts after suite completes
   afterAll(async () => {
     if (testAccountCodes.length > 0) {
-      await prisma.accountMaster.deleteMany({
-        where: {
-          code: { in: testAccountCodes },
-        },
-      });
+      await AccountMaster.destroy({ where: { code: { [Op.in]: testAccountCodes } } });
     }
   });
 
@@ -295,7 +292,7 @@ describe("Phase 6: Account Master Foundation", () => {
   // ==================== 7. ADMIN AUTHORIZATION ====================
   describe("7. ADMIN Authorization on Server Actions", () => {
     beforeEach(async () => {
-      const realAdmin = await prisma.user.findFirst({ where: { role: "ADMIN" } });
+      const realAdmin = await User.findOne({ where: { role: "ADMIN" } });
       vi.mocked(checkAdmin).mockResolvedValue({
         authenticated: true,
         user: {
@@ -404,28 +401,20 @@ describe("Phase 6: Account Master Foundation", () => {
   describe("9. Existing LedgerEntry Integrity", () => {
     it("ensures historical LedgerEntry records without accountId remain valid", async () => {
       // Find an existing loan to create a standard single-entry ledger record
-      const loan = await prisma.loan.findFirst({ select: { id: true } });
+      const loan = await Loan.findOne({ attributes: ["id"] });
       if (loan) {
-        const entry = await prisma.ledgerEntry.create({
-          data: {
-            loanId: loan.id,
-            type: "DISBURSEMENT",
-            amount: new Prisma.Decimal("1000.00"),
-            principalAfter: new Prisma.Decimal("1000.00"),
-            description: "Phase 6 backward compatibility test entry",
-          },
-        });
+        const entry = await LedgerEntry.create({ loanId: loan.id, type: "DISBURSEMENT", amount: "1000.00", principalAfter: "1000.00", description: "Phase 6 backward compatibility test entry" });
 
         expect(entry.id).toBeDefined();
-        expect(entry.accountId).toBeNull(); // accountId is optional and defaults to null
+        expect(entry.accountId ?? null).toBeNull(); // accountId is optional and defaults to null
 
         // Clean up test entry
-        await prisma.ledgerEntry.delete({ where: { id: entry.id } });
+        await entry.destroy();
       }
     });
 
     it("supports optional linkage to AccountMaster without breaking single-entry structure", async () => {
-      const loan = await prisma.loan.findFirst({ select: { id: true } });
+      const loan = await Loan.findOne({ attributes: ["id"] });
       if (loan) {
         const code = trackCode(`TEST-LEDG-${Date.now()}`);
         const account = await createAccount({
@@ -434,25 +423,11 @@ describe("Phase 6: Account Master Foundation", () => {
           type: "ASSET",
         });
 
-        const entry = await prisma.ledgerEntry.create({
-          data: {
-            loanId: loan.id,
-            accountId: account.id,
-            type: "DISBURSEMENT",
-            amount: new Prisma.Decimal("5000.00"),
-            principalAfter: new Prisma.Decimal("5000.00"),
-            description: "Phase 6 linked entry test",
-          },
-          include: {
-            account: true,
-          },
-        });
-
-        expect(entry.accountId).toBe(account.id);
-        expect(entry.account?.code).toBe(code);
-
-        // Clean up test entry
-        await prisma.ledgerEntry.delete({ where: { id: entry.id } });
+        const entry = await LedgerEntry.create({ loanId: loan.id, accountId: account.id, type: "DISBURSEMENT", amount: "5000.00", principalAfter: "5000.00", description: "Phase 6 linked entry test" });
+        const fullEntry = await LedgerEntry.findByPk(entry.id, { include: [{ model: AccountMaster, as: "account" }] });
+        expect(fullEntry?.accountId).toBe(account.id);
+        expect((fullEntry as any)?.account?.code).toBe(code);
+        await entry.destroy();
       }
     });
   });
@@ -460,8 +435,8 @@ describe("Phase 6: Account Master Foundation", () => {
   // ==================== 10. FINANCIAL CALCULATIONS UNCHANGED ====================
   describe("10. Existing Pawnify Financial Calculations Unchanged", () => {
     it("interest calculation formula is exactly preserved", () => {
-      const principal = new Prisma.Decimal("100000");
-      const monthlyRate = new Prisma.Decimal("2.000"); // 2% per month
+      const principal = new Decimal("100000");
+      const monthlyRate = new Decimal("2.000"); // 2% per month
       const lastSettledDate = new Date("2026-01-01T00:00:00Z");
       const asOfDate = new Date("2026-01-31T00:00:00Z"); // 30 days
 
@@ -501,8 +476,8 @@ describe("Phase 6: Account Master Foundation", () => {
 
     it("verifies LedgerEntry projection continues scaling monetary values only", () => {
       const rawEntry = {
-        amount: new Prisma.Decimal("10000.00"),
-        principalAfter: new Prisma.Decimal("50000.00"),
+        amount: new Decimal("10000.00"),
+        principalAfter: new Decimal("50000.00"),
         description: "Payment entry",
       };
 

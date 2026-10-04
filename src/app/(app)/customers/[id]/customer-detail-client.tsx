@@ -230,7 +230,7 @@ export function CustomerDetailClient({ id, isAdmin }: CustomerDetailClientProps)
               </div>
             ) : (
               <div className="space-y-3">
-                {customer.kycDocuments.map((doc) => (
+                {customer.kycDocuments.map((doc: any) => (
                   <div
                     key={doc.id}
                     className="p-3.5 rounded-xl bg-(--bg-tertiary) border border-(--border-primary) flex items-center justify-between gap-4"
@@ -300,7 +300,7 @@ export function CustomerDetailClient({ id, isAdmin }: CustomerDetailClientProps)
                     </tr>
                   </thead>
                   <tbody>
-                    {customer.loans.map((l) => (
+                    {customer.loans.map((l: any) => (
                       <tr key={l.id}>
                         <td className="font-mono text-xs font-medium text-(--accent)">
                           <Link href={`/loans/${l.id}`} className="hover:underline">

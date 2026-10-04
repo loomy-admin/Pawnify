@@ -47,6 +47,10 @@ export const createLoanSchema = z.object({
     .lte(90, "Grace period cannot exceed 90 days")
     .default(7),
   processingFee: z.coerce.number().gte(0).optional(),
+  loanType: z.enum(["STANDARD", "CUMULATIVE"]).default("STANDARD"),
+  cumulativeFrequency: z.enum(["MONTHLY", "QUARTERLY", "HALF_YEARLY", "YEARLY"]).optional(),
+  cumulativeTreatment: z.enum(["ADD_TO_CAPITAL", "KEEP_SEPARATE"]).optional(),
+  asDraft: z.boolean().optional(),
 });
 
 export type CreateLoanFormInput = z.infer<typeof createLoanSchema>;

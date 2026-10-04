@@ -3,32 +3,25 @@
  *
  * Provides authoritative read-only derived reports over the existing Pawnify
  * single-entry financial ledger and domain models.
- *
- * STRICTLY LOCKED RULES:
- * 1. Read-only derived reporting — zero state modification, no second ledger.
- * 2. Pure single-entry model — LedgerEntry remains the ONLY financial event ledger.
- * 3. No persisted account or customer or dashboard balances.
- * 4. All financial calculations use Prisma.Decimal arithmetic.
- * 5. 50% calculation mode is presentation-only (projected once at boundary).
- * 6. Historical LedgerEntry rows with accountId = NULL are handled safely.
- * 7. Payment waterfall remains 1: Unsettled Charges (incl Penal), 2: Interest, 3: Principal.
- * 8. Interest calculation uses the existing Actual/365 simple interest engine.
  */
 
-import { prisma } from "@/lib/db";
+import Decimal from "decimal.js";
 import {
-  Prisma,
+  Loan,
+  LoanItem,
+  Payment,
+  LedgerEntry,
+  Customer,
+  AccountMaster,
+  Op,
   PaymentMode,
   TransactionType,
   AccountType,
   LoanStatus,
-} from "@prisma/client";
-import { deriveLoanDisplayStatus } from "@/lib/services/loans";
+} from "@/lib/db";
+import { deriveLoanDisplayStatus, LoanDisplayStatus } from "@/lib/services/loans";
 import { computeAccruedInterest } from "@/lib/services/interest";
 import { classifyFlow, CashFlowDirection } from "@/lib/services/day-book";
-
-const Decimal = Prisma.Decimal;
-type Decimal = Prisma.Decimal;
 
 export interface BaseReportFilter {
   startDate?: Date | string | null;
@@ -77,7 +70,7 @@ export interface LoanRegisterItem {
   loanDate: Date;
   dueDate: Date;
   status: LoanStatus;
-  displayStatus: "ACTIVE" | "OVERDUE" | "CLOSED";
+  displayStatus: LoanDisplayStatus;
   principalAmount: Decimal;
   principalOutstanding: Decimal;
   interestRateMonthly: Decimal;
@@ -106,14 +99,14 @@ export async function getLoanRegisterReport(
 ): Promise<LoanRegisterResult> {
   const { start, end } = parseDateBounds(filter.startDate, filter.endDate);
 
-  const where: Prisma.LoanWhereInput = {};
+  const where: any = {};
 
   if (start && end) {
-    where.loanDate = { gte: start, lte: end };
+    where.loanDate = { [Op.gte]: start, [Op.lte]: end };
   } else if (start) {
-    where.loanDate = { gte: start };
+    where.loanDate = { [Op.gte]: start };
   } else if (end) {
-    where.loanDate = { lte: end };
+    where.loanDate = { [Op.lte]: end };
   }
 
   if (filter.status === "CLOSED") {
@@ -123,29 +116,25 @@ export async function getLoanRegisterReport(
   }
 
   if (filter.search && filter.search.trim()) {
-    const s = filter.search.trim();
-    where.OR = [
-      { loanNumber: { contains: s, mode: "insensitive" } },
-      { customer: { fullName: { contains: s, mode: "insensitive" } } },
-      { customer: { phone: { contains: s } } },
+    const s = `%${filter.search.trim()}%`;
+    where[Op.or] = [
+      { loanNumber: { [Op.like]: s } },
+      { "$customer.fullName$": { [Op.like]: s } },
+      { "$customer.phone$": { [Op.like]: s } },
     ];
   }
 
-  const loans = await prisma.loan.findMany({
+  const rawLoans = await Loan.findAll({
     where,
-    include: {
-      customer: { select: { id: true, fullName: true, phone: true } },
-      items: {
-        select: {
-          id: true,
-          metalType: true,
-          grossWeightGrams: true,
-          netWeightGrams: true,
-          description: true,
-        },
+    include: [
+      { model: Customer, as: "customer", attributes: ["id", "fullName", "phone"] },
+      {
+        model: LoanItem,
+        as: "items",
+        attributes: ["id", "metalType", "grossWeightGrams", "netWeightGrams", "description"],
       },
-    },
-    orderBy: { loanDate: "desc" },
+    ],
+    order: [["loanDate", "DESC"]],
   });
 
   let totalPrincipalAmount = new Decimal(0);
@@ -156,10 +145,21 @@ export async function getLoanRegisterReport(
 
   const items: LoanRegisterItem[] = [];
 
-  for (const l of loans) {
-    const displayStatus = deriveLoanDisplayStatus(l);
+  for (const rawL of rawLoans) {
+    const l = rawL.toJSON() as any;
+    const loanObj = {
+      ...l,
+      principalAmount: new Decimal(l.principalAmount ?? 0),
+      principalOutstanding: new Decimal(l.principalOutstanding ?? 0),
+      interestRateMonthly: new Decimal(l.interestRateMonthly ?? 0),
+      totalAssessedValue: new Decimal(l.totalAssessedValue ?? 0),
+      dueDate: new Date(l.dueDate),
+      loanDate: new Date(l.loanDate),
+      createdAt: new Date(l.createdAt),
+    };
 
-    // Apply granular status filter (ACTIVE vs OVERDUE)
+    const displayStatus = deriveLoanDisplayStatus(loanObj);
+
     if (filter.status === "ACTIVE" && displayStatus !== "ACTIVE") continue;
     if (filter.status === "OVERDUE" && displayStatus !== "OVERDUE") continue;
 
@@ -167,37 +167,37 @@ export async function getLoanRegisterReport(
     else if (displayStatus === "ACTIVE") activeCount++;
     else if (displayStatus === "CLOSED") closedCount++;
 
-    totalPrincipalAmount = totalPrincipalAmount.plus(l.principalAmount);
-    totalPrincipalOutstanding = totalPrincipalOutstanding.plus(l.principalOutstanding);
+    totalPrincipalAmount = totalPrincipalAmount.plus(loanObj.principalAmount);
+    totalPrincipalOutstanding = totalPrincipalOutstanding.plus(loanObj.principalOutstanding);
 
     const metalCounts: Record<string, number> = {};
-    for (const it of l.items) {
+    for (const it of l.items || []) {
       metalCounts[it.metalType] = (metalCounts[it.metalType] || 0) + 1;
     }
     const metalStr = Object.entries(metalCounts)
       .map(([m, c]) => `${c} ${m}`)
       .join(", ");
-    const collateralSummary = `${l.items.length} items${metalStr ? ` (${metalStr})` : ""}`;
+    const collateralSummary = `${(l.items || []).length} items${metalStr ? ` (${metalStr})` : ""}`;
 
     items.push({
-      id: l.id,
-      loanNumber: l.loanNumber,
-      customerId: l.customer.id,
-      customerName: l.customer.fullName,
-      customerPhone: l.customer.phone,
-      loanDate: l.loanDate,
-      dueDate: l.dueDate,
-      status: l.status,
+      id: loanObj.id,
+      loanNumber: loanObj.loanNumber,
+      customerId: loanObj.customer?.id ?? "",
+      customerName: loanObj.customer?.fullName ?? "",
+      customerPhone: loanObj.customer?.phone ?? "",
+      loanDate: loanObj.loanDate,
+      dueDate: loanObj.dueDate,
+      status: loanObj.status,
       displayStatus,
-      principalAmount: l.principalAmount,
-      principalOutstanding: l.principalOutstanding,
-      interestRateMonthly: l.interestRateMonthly,
-      tenureMonths: l.tenureMonths,
-      gracePeriodDays: l.gracePeriodDays,
-      collateralCount: l.items.length,
+      principalAmount: loanObj.principalAmount,
+      principalOutstanding: loanObj.principalOutstanding,
+      interestRateMonthly: loanObj.interestRateMonthly,
+      tenureMonths: loanObj.tenureMonths,
+      gracePeriodDays: loanObj.gracePeriodDays,
+      collateralCount: (l.items || []).length,
       collateralSummary,
-      totalAssessedValue: l.totalAssessedValue,
-      createdAt: l.createdAt,
+      totalAssessedValue: loanObj.totalAssessedValue,
+      createdAt: loanObj.createdAt,
     });
   }
 
@@ -214,7 +214,7 @@ export async function getLoanRegisterReport(
   };
 }
 
-// ==================== 2. PAYMENT / COLLECTION REGISTER ====================
+// ==================== 2. PAYMENT REGISTER ====================
 
 export interface PaymentRegisterFilter extends BaseReportFilter {
   mode?: "ALL" | PaymentMode;
@@ -255,14 +255,14 @@ export async function getPaymentRegisterReport(
 ): Promise<PaymentRegisterResult> {
   const { start, end } = parseDateBounds(filter.startDate, filter.endDate);
 
-  const where: Prisma.PaymentWhereInput = {};
+  const where: any = {};
 
   if (start && end) {
-    where.paymentDate = { gte: start, lte: end };
+    where.paymentDate = { [Op.gte]: start, [Op.lte]: end };
   } else if (start) {
-    where.paymentDate = { gte: start };
+    where.paymentDate = { [Op.gte]: start };
   } else if (end) {
-    where.paymentDate = { lte: end };
+    where.paymentDate = { [Op.lte]: end };
   }
 
   if (filter.mode && filter.mode !== "ALL") {
@@ -270,29 +270,37 @@ export async function getPaymentRegisterReport(
   }
 
   if (filter.search && filter.search.trim()) {
-    const s = filter.search.trim();
-    where.OR = [
-      { receiptNumber: { contains: s, mode: "insensitive" } },
-      { loan: { loanNumber: { contains: s, mode: "insensitive" } } },
-      { loan: { customer: { fullName: { contains: s, mode: "insensitive" } } } },
-      { loan: { customer: { phone: { contains: s } } } },
+    const s = `%${filter.search.trim()}%`;
+    where[Op.or] = [
+      { receiptNumber: { [Op.like]: s } },
+      { "$loan.loanNumber$": { [Op.like]: s } },
+      { "$loan.customer.fullName$": { [Op.like]: s } },
+      { "$loan.customer.phone$": { [Op.like]: s } },
     ];
   }
 
-  const payments = await prisma.payment.findMany({
+  const rawPayments = await Payment.findAll({
     where,
-    include: {
-      loan: {
-        select: {
-          id: true,
-          loanNumber: true,
-          principalOutstanding: true,
-          customer: { select: { id: true, fullName: true, phone: true } },
-        },
+    include: [
+      {
+        model: Loan,
+        as: "loan",
+        attributes: ["id", "loanNumber", "principalOutstanding"],
+        include: [
+          {
+            model: Customer,
+            as: "customer",
+            attributes: ["id", "fullName", "phone"],
+          },
+        ],
       },
-      collectedBy: { select: { id: true, name: true } },
-    },
-    orderBy: { paymentDate: "desc" },
+      {
+        model: Payment.associations.collectedBy.target,
+        as: "collectedBy",
+        attributes: ["id", "name"],
+      },
+    ],
+    order: [["paymentDate", "DESC"]],
   });
 
   let totalAmountPaid = new Decimal(0);
@@ -300,28 +308,35 @@ export async function getPaymentRegisterReport(
   let totalAllocatedInterest = new Decimal(0);
   let totalAllocatedCharges = new Decimal(0);
 
-  const items: PaymentRegisterItem[] = payments.map((p) => {
-    totalAmountPaid = totalAmountPaid.plus(p.amountPaid);
-    totalAllocatedPrincipal = totalAllocatedPrincipal.plus(p.allocatedPrincipal);
-    totalAllocatedInterest = totalAllocatedInterest.plus(p.allocatedInterest);
-    totalAllocatedCharges = totalAllocatedCharges.plus(p.allocatedCharges);
+  const items: PaymentRegisterItem[] = rawPayments.map((rawP) => {
+    const p = rawP.toJSON() as any;
+    const amountPaid = new Decimal(p.amountPaid ?? 0);
+    const allocatedPrincipal = new Decimal(p.allocatedPrincipal ?? 0);
+    const allocatedInterest = new Decimal(p.allocatedInterest ?? 0);
+    const allocatedCharges = new Decimal(p.allocatedCharges ?? 0);
+    const remainingPrincipal = new Decimal(p.loan?.principalOutstanding ?? 0);
+
+    totalAmountPaid = totalAmountPaid.plus(amountPaid);
+    totalAllocatedPrincipal = totalAllocatedPrincipal.plus(allocatedPrincipal);
+    totalAllocatedInterest = totalAllocatedInterest.plus(allocatedInterest);
+    totalAllocatedCharges = totalAllocatedCharges.plus(allocatedCharges);
 
     return {
       id: p.id,
-      paymentDate: p.paymentDate,
+      paymentDate: new Date(p.paymentDate),
       receiptNumber: p.receiptNumber,
-      loanId: p.loan.id,
-      loanNumber: p.loan.loanNumber,
-      customerId: p.loan.customer.id,
-      customerName: p.loan.customer.fullName,
-      customerPhone: p.loan.customer.phone,
-      amountPaid: p.amountPaid,
-      allocatedCharges: p.allocatedCharges,
-      allocatedInterest: p.allocatedInterest,
-      allocatedPrincipal: p.allocatedPrincipal,
-      remainingPrincipal: p.loan.principalOutstanding,
+      loanId: p.loan?.id ?? "",
+      loanNumber: p.loan?.loanNumber ?? "",
+      customerId: p.loan?.customer?.id ?? "",
+      customerName: p.loan?.customer?.fullName ?? "",
+      customerPhone: p.loan?.customer?.phone ?? "",
+      amountPaid,
+      allocatedCharges,
+      allocatedInterest,
+      allocatedPrincipal,
+      remainingPrincipal,
       mode: p.mode,
-      collectedByName: p.collectedBy.name,
+      collectedByName: p.collectedBy?.name ?? "",
       notes: p.notes,
     };
   });
@@ -375,16 +390,16 @@ export async function getDisbursementRegisterReport(
 ): Promise<DisbursementRegisterResult> {
   const { start, end } = parseDateBounds(filter.startDate, filter.endDate);
 
-  const where: Prisma.LedgerEntryWhereInput = {
+  const where: any = {
     type: "DISBURSEMENT",
   };
 
   if (start && end) {
-    where.createdAt = { gte: start, lte: end };
+    where.createdAt = { [Op.gte]: start, [Op.lte]: end };
   } else if (start) {
-    where.createdAt = { gte: start };
+    where.createdAt = { [Op.gte]: start };
   } else if (end) {
-    where.createdAt = { lte: end };
+    where.createdAt = { [Op.lte]: end };
   }
 
   if (filter.accountId === "UNASSIGNED") {
@@ -394,54 +409,61 @@ export async function getDisbursementRegisterReport(
   }
 
   if (filter.search && filter.search.trim()) {
-    const s = filter.search.trim();
-    where.OR = [
-      { loan: { loanNumber: { contains: s, mode: "insensitive" } } },
-      { loan: { customer: { fullName: { contains: s, mode: "insensitive" } } } },
-      { referenceId: { contains: s, mode: "insensitive" } },
-      { description: { contains: s, mode: "insensitive" } },
+    const s = `%${filter.search.trim()}%`;
+    where[Op.or] = [
+      { "$loan.loanNumber$": { [Op.like]: s } },
+      { "$loan.customer.fullName$": { [Op.like]: s } },
+      { referenceId: { [Op.like]: s } },
+      { description: { [Op.like]: s } },
     ];
   }
 
-  const entries = await prisma.ledgerEntry.findMany({
+  const rawEntries = await LedgerEntry.findAll({
     where,
-    include: {
-      loan: {
-        select: {
-          id: true,
-          loanNumber: true,
-          interestRateMonthly: true,
-          tenureMonths: true,
-          customer: { select: { id: true, fullName: true, phone: true } },
-        },
+    include: [
+      {
+        model: Loan,
+        as: "loan",
+        attributes: ["id", "loanNumber", "interestRateMonthly", "tenureMonths"],
+        include: [
+          {
+            model: Customer,
+            as: "customer",
+            attributes: ["id", "fullName", "phone"],
+          },
+        ],
       },
-      account: {
-        select: { id: true, code: true, name: true, type: true },
+      {
+        model: AccountMaster,
+        as: "account",
+        attributes: ["id", "code", "name", "type"],
       },
-    },
-    orderBy: { createdAt: "desc" },
+    ],
+    order: [["createdAt", "DESC"]],
   });
 
   let totalDisbursedAmount = new Decimal(0);
 
-  const items: DisbursementRegisterItem[] = entries.map((e) => {
-    totalDisbursedAmount = totalDisbursedAmount.plus(e.amount);
+  const items: DisbursementRegisterItem[] = rawEntries.map((rawE) => {
+    const e = rawE.toJSON() as any;
+    const amount = new Decimal(e.amount ?? 0);
+    totalDisbursedAmount = totalDisbursedAmount.plus(amount);
 
     return {
       id: e.id,
-      disbursementDate: e.createdAt,
-      loanId: e.loan.id,
-      loanNumber: e.loan.loanNumber,
-      customerId: e.loan.customer.id,
-      customerName: e.loan.customer.fullName,
-      customerPhone: e.loan.customer.phone,
-      disbursementAmount: e.amount,
-      referenceId: e.referenceId,
-      accountId: e.accountId,
+      disbursementDate: new Date(e.createdAt),
+      loanId: e.loan?.id ?? "",
+      loanNumber: e.loan?.loanNumber ?? "",
+      customerId: e.loan?.customer?.id ?? "",
+      customerName: e.loan?.customer?.fullName ?? "",
+      customerPhone: e.loan?.customer?.phone ?? "",
+      disbursementAmount: amount,
+      referenceId: e.referenceId ?? null,
+      accountId: e.accountId ?? null,
       accountCode: e.account?.code ?? null,
       accountName: e.account?.name ?? null,
-      interestRateMonthly: e.loan.interestRateMonthly,
-      tenureMonths: e.loan.tenureMonths,
+      interestRateMonthly: new Decimal(e.loan?.interestRateMonthly ?? 0),
+      tenureMonths: e.loan?.tenureMonths ?? 0,
       description: e.description,
     };
   });
@@ -493,25 +515,25 @@ export async function getOverdueLoansReport(
 ): Promise<OverdueLoansResult> {
   const now = new Date();
 
-  const where: Prisma.LoanWhereInput = {
+  const where: any = {
     status: "ACTIVE",
   };
 
   if (filter.search && filter.search.trim()) {
-    const s = filter.search.trim();
-    where.OR = [
-      { loanNumber: { contains: s, mode: "insensitive" } },
-      { customer: { fullName: { contains: s, mode: "insensitive" } } },
-      { customer: { phone: { contains: s } } },
+    const s = `%${filter.search.trim()}%`;
+    where[Op.or] = [
+      { loanNumber: { [Op.like]: s } },
+      { "$customer.fullName$": { [Op.like]: s } },
+      { "$customer.phone$": { [Op.like]: s } },
     ];
   }
 
-  const activeLoans = await prisma.loan.findMany({
+  const rawActiveLoans = await Loan.findAll({
     where,
-    include: {
-      customer: { select: { id: true, fullName: true, phone: true } },
-    },
-    orderBy: { dueDate: "asc" },
+    include: [
+      { model: Customer, as: "customer", attributes: ["id", "fullName", "phone"] },
+    ],
+    order: [["dueDate", "ASC"]],
   });
 
   let totalPrincipalOutstanding = new Decimal(0);
@@ -520,44 +542,53 @@ export async function getOverdueLoansReport(
 
   const items: OverdueLoanItem[] = [];
 
-  for (const l of activeLoans) {
-    if (deriveLoanDisplayStatus(l) !== "OVERDUE") continue;
+  for (const rawL of rawActiveLoans) {
+    const l = rawL.toJSON() as any;
+    const loanObj = {
+      ...l,
+      principalAmount: new Decimal(l.principalAmount ?? 0),
+      principalOutstanding: new Decimal(l.principalOutstanding ?? 0),
+      interestRateMonthly: new Decimal(l.interestRateMonthly ?? 0),
+      dueDate: new Date(l.dueDate),
+      loanDate: new Date(l.loanDate),
+      lastSettledDate: new Date(l.lastSettledDate),
+    };
 
-    // Days overdue = calendar difference from (dueDate + gracePeriodDays)
-    const graceDueDate = new Date(l.dueDate);
-    graceDueDate.setDate(graceDueDate.getDate() + l.gracePeriodDays);
+    if (deriveLoanDisplayStatus(loanObj) !== "OVERDUE") continue;
+
+    const graceDueDate = new Date(loanObj.dueDate);
+    graceDueDate.setDate(graceDueDate.getDate() + loanObj.gracePeriodDays);
     const diffMs = now.getTime() - graceDueDate.getTime();
     const daysOverdue = Math.max(1, Math.floor(diffMs / (1000 * 60 * 60 * 24)));
 
-    // Authoritative Actual/365 simple interest engine
     const accrued = computeAccruedInterest(
       {
-        principalOutstanding: l.principalOutstanding,
-        interestRateMonthly: l.interestRateMonthly,
-        lastSettledDate: l.lastSettledDate,
+        principalOutstanding: loanObj.principalOutstanding,
+        interestRateMonthly: loanObj.interestRateMonthly,
+        lastSettledDate: loanObj.lastSettledDate,
       },
       now
     );
 
-    const loanTotalDue = l.principalOutstanding.plus(accrued);
+    const loanTotalDue = loanObj.principalOutstanding.plus(accrued);
 
-    totalPrincipalOutstanding = totalPrincipalOutstanding.plus(l.principalOutstanding);
+    totalPrincipalOutstanding = totalPrincipalOutstanding.plus(loanObj.principalOutstanding);
     totalAccruedInterest = totalAccruedInterest.plus(accrued);
     totalDue = totalDue.plus(loanTotalDue);
 
     items.push({
-      id: l.id,
-      loanNumber: l.loanNumber,
-      customerId: l.customer.id,
-      customerName: l.customer.fullName,
-      customerPhone: l.customer.phone,
-      loanDate: l.loanDate,
-      dueDate: l.dueDate,
-      gracePeriodDays: l.gracePeriodDays,
+      id: loanObj.id,
+      loanNumber: loanObj.loanNumber,
+      customerId: loanObj.customer?.id ?? "",
+      customerName: loanObj.customer?.fullName ?? "",
+      customerPhone: loanObj.customer?.phone ?? "",
+      loanDate: loanObj.loanDate,
+      dueDate: loanObj.dueDate,
+      gracePeriodDays: loanObj.gracePeriodDays,
       daysOverdue,
-      interestRateMonthly: l.interestRateMonthly,
-      principalAmount: l.principalAmount,
-      principalOutstanding: l.principalOutstanding,
+      interestRateMonthly: loanObj.interestRateMonthly,
+      principalAmount: loanObj.principalAmount,
+      principalOutstanding: loanObj.principalOutstanding,
       accruedInterest: accrued,
       totalDue: loanTotalDue,
     });
@@ -610,36 +641,42 @@ export async function getCustomerWiseLoanSummaryReport(
 ): Promise<CustomerWiseSummaryResult> {
   const now = new Date();
 
-  const where: Prisma.CustomerWhereInput = {};
+  const where: any = {};
 
   if (filter.search && filter.search.trim()) {
-    const s = filter.search.trim();
-    where.OR = [
-      { fullName: { contains: s, mode: "insensitive" } },
-      { phone: { contains: s } },
-      { email: { contains: s, mode: "insensitive" } },
+    const s = `%${filter.search.trim()}%`;
+    where[Op.or] = [
+      { fullName: { [Op.like]: s } },
+      { phone: { [Op.like]: s } },
+      { email: { [Op.like]: s } },
     ];
   }
 
-  const customers = await prisma.customer.findMany({
+  const rawCustomers = await Customer.findAll({
     where,
-    include: {
-      loans: {
-        select: {
-          id: true,
-          status: true,
-          dueDate: true,
-          gracePeriodDays: true,
-          principalOutstanding: true,
-          interestRateMonthly: true,
-          lastSettledDate: true,
-          payments: {
-            select: { amountPaid: true },
+    include: [
+      {
+        model: Loan,
+        as: "loans",
+        attributes: [
+          "id",
+          "status",
+          "dueDate",
+          "gracePeriodDays",
+          "principalOutstanding",
+          "interestRateMonthly",
+          "lastSettledDate",
+        ],
+        include: [
+          {
+            model: Payment,
+            as: "payments",
+            attributes: ["amountPaid"],
           },
-        },
+        ],
       },
-    },
-    orderBy: { fullName: "asc" },
+    ],
+    order: [["fullName", "ASC"]],
   });
 
   let grandLoans = 0;
@@ -649,7 +686,8 @@ export async function getCustomerWiseLoanSummaryReport(
 
   const items: CustomerWiseSummaryItem[] = [];
 
-  for (const c of customers) {
+  for (const rawC of rawCustomers) {
+    const c = rawC.toJSON() as any;
     let activeLoans = 0;
     let overdueLoans = 0;
     let closedLoans = 0;
@@ -657,7 +695,15 @@ export async function getCustomerWiseLoanSummaryReport(
     let accruedInterest = new Decimal(0);
     let totalPayments = new Decimal(0);
 
-    for (const l of c.loans) {
+    for (const rawL of c.loans || []) {
+      const l = {
+        ...rawL,
+        principalOutstanding: new Decimal(rawL.principalOutstanding ?? 0),
+        interestRateMonthly: new Decimal(rawL.interestRateMonthly ?? 0),
+        dueDate: new Date(rawL.dueDate),
+        lastSettledDate: new Date(rawL.lastSettledDate),
+      };
+
       const displayStatus = deriveLoanDisplayStatus(l);
       if (displayStatus === "OVERDUE") {
         overdueLoans++;
@@ -689,12 +735,12 @@ export async function getCustomerWiseLoanSummaryReport(
         closedLoans++;
       }
 
-      for (const p of l.payments) {
-        totalPayments = totalPayments.plus(p.amountPaid);
+      for (const p of rawL.payments || []) {
+        totalPayments = totalPayments.plus(new Decimal(p.amountPaid ?? 0));
       }
     }
 
-    grandLoans += c.loans.length;
+    grandLoans += (c.loans || []).length;
     grandOutstanding = grandOutstanding.plus(outstandingPrincipal);
     grandAccruedInterest = grandAccruedInterest.plus(accruedInterest);
     grandPayments = grandPayments.plus(totalPayments);
@@ -704,7 +750,7 @@ export async function getCustomerWiseLoanSummaryReport(
       customerName: c.fullName,
       phone: c.phone,
       email: c.email,
-      totalLoans: c.loans.length,
+      totalLoans: (c.loans || []).length,
       activeLoans,
       overdueLoans,
       closedLoans,
@@ -759,30 +805,30 @@ export async function getAccountWiseFinancialSummaryReport(
 ): Promise<AccountWiseSummaryResult> {
   const { start, end } = parseDateBounds(filter.startDate, filter.endDate);
 
-  const accountWhere: Prisma.AccountMasterWhereInput = {};
+  const accountWhere: any = {};
   if (filter.type && filter.type !== "ALL") {
     accountWhere.type = filter.type;
   }
   if (filter.search && filter.search.trim()) {
-    const s = filter.search.trim();
-    accountWhere.OR = [
-      { code: { contains: s, mode: "insensitive" } },
-      { name: { contains: s, mode: "insensitive" } },
+    const s = `%${filter.search.trim()}%`;
+    accountWhere[Op.or] = [
+      { code: { [Op.like]: s } },
+      { name: { [Op.like]: s } },
     ];
   }
 
-  const accounts = await prisma.accountMaster.findMany({
+  const accounts = await AccountMaster.findAll({
     where: accountWhere,
-    orderBy: { code: "asc" },
+    order: [["code", "ASC"]],
   });
 
-  const entryWhere: Prisma.LedgerEntryWhereInput = {};
+  const entryWhere: any = {};
   if (start && end) {
-    entryWhere.createdAt = { gte: start, lte: end };
+    entryWhere.createdAt = { [Op.gte]: start, [Op.lte]: end };
   } else if (start) {
-    entryWhere.createdAt = { gte: start };
+    entryWhere.createdAt = { [Op.gte]: start };
   } else if (end) {
-    entryWhere.createdAt = { lte: end };
+    entryWhere.createdAt = { [Op.lte]: end };
   }
 
   let grandInflow = new Decimal(0);
@@ -791,26 +837,25 @@ export async function getAccountWiseFinancialSummaryReport(
   const items: AccountWiseSummaryItem[] = [];
 
   for (const acc of accounts) {
-    const entries = await prisma.ledgerEntry.findMany({
+    const entries = await LedgerEntry.findAll({
       where: {
         ...entryWhere,
         accountId: acc.id,
       },
-      select: {
-        type: true,
-        amount: true,
-      },
+      attributes: ["type", "amount"],
     });
 
     let totalInflow = new Decimal(0);
     let totalOutflow = new Decimal(0);
 
-    for (const e of entries) {
+    for (const rawE of entries) {
+      const e = rawE.toJSON() as any;
+      const amt = new Decimal(e.amount ?? 0);
       const flow = classifyFlow(e.type);
       if (flow === "INFLOW") {
-        totalInflow = totalInflow.plus(e.amount);
+        totalInflow = totalInflow.plus(amt);
       } else if (flow === "OUTFLOW") {
-        totalOutflow = totalOutflow.plus(e.amount);
+        totalOutflow = totalOutflow.plus(amt);
       }
     }
 
@@ -822,7 +867,7 @@ export async function getAccountWiseFinancialSummaryReport(
       accountId: acc.id,
       accountCode: acc.code,
       accountName: acc.name,
-      accountType: acc.type,
+      accountType: acc.type as AccountType,
       isActive: acc.isActive,
       transactionCount: entries.length,
       totalInflow,
@@ -869,13 +914,13 @@ export async function getDayBookSummaryReport(
 ): Promise<DayBookSummaryReportResult> {
   const { start, end } = parseDateBounds(filter.startDate, filter.endDate);
 
-  const where: Prisma.LedgerEntryWhereInput = {};
+  const where: any = {};
   if (start && end) {
-    where.createdAt = { gte: start, lte: end };
+    where.createdAt = { [Op.gte]: start, [Op.lte]: end };
   } else if (start) {
-    where.createdAt = { gte: start };
+    where.createdAt = { [Op.gte]: start };
   } else if (end) {
-    where.createdAt = { lte: end };
+    where.createdAt = { [Op.lte]: end };
   }
 
   if (filter.eventType && filter.eventType !== "ALL") {
@@ -888,12 +933,9 @@ export async function getDayBookSummaryReport(
     where.accountId = filter.accountId;
   }
 
-  const entries = await prisma.ledgerEntry.findMany({
+  const entries = await LedgerEntry.findAll({
     where,
-    select: {
-      type: true,
-      amount: true,
-    },
+    attributes: ["type", "amount"],
   });
 
   let totalInflow = new Decimal(0);
@@ -903,12 +945,14 @@ export async function getDayBookSummaryReport(
   let closureCount = 0;
   let itemReleaseCount = 0;
 
-  for (const e of entries) {
+  for (const rawE of entries) {
+    const e = rawE.toJSON() as any;
+    const amt = new Decimal(e.amount ?? 0);
     const flow = classifyFlow(e.type);
     if (flow === "INFLOW") {
-      totalInflow = totalInflow.plus(e.amount);
+      totalInflow = totalInflow.plus(amt);
     } else if (flow === "OUTFLOW") {
-      totalOutflow = totalOutflow.plus(e.amount);
+      totalOutflow = totalOutflow.plus(amt);
     }
 
     if (e.type === "PAYMENT") paymentCount++;
@@ -941,7 +985,6 @@ export interface PortfolioSummaryFilter {
 }
 
 export interface PortfolioSummaryResult {
-  // Point-in-time metrics
   pointInTime: {
     totalLoanCount: number;
     activeLoanCount: number;
@@ -956,7 +999,6 @@ export interface PortfolioSummaryResult {
     goldAssessedValue: Decimal;
     silverAssessedValue: Decimal;
   };
-  // Period metrics
   period: {
     startDate: string | null;
     endDate: string | null;
@@ -976,11 +1018,14 @@ export async function getPortfolioSummaryReport(
   const now = new Date();
   const { start, end } = parseDateBounds(filter.startDate, filter.endDate);
 
-  // 1. Authoritative Point-in-time active loans
-  const allLoans = await prisma.loan.findMany({
-    include: {
-      items: { select: { metalType: true, assessedValue: true } },
-    },
+  const allLoans = await Loan.findAll({
+    include: [
+      {
+        model: LoanItem,
+        as: "items",
+        attributes: ["metalType", "assessedValue"],
+      },
+    ],
   });
 
   let activeLoanCount = 0;
@@ -995,19 +1040,30 @@ export async function getPortfolioSummaryReport(
   let goldAssessedValue = new Decimal(0);
   let silverAssessedValue = new Decimal(0);
 
-  for (const l of allLoans) {
-    principalDisbursedTotal = principalDisbursedTotal.plus(l.principalAmount);
-    const displayStatus = deriveLoanDisplayStatus(l);
+  for (const rawL of allLoans) {
+    const l = rawL.toJSON() as any;
+    const loanObj = {
+      ...l,
+      principalAmount: new Decimal(l.principalAmount ?? 0),
+      principalOutstanding: new Decimal(l.principalOutstanding ?? 0),
+      totalAssessedValue: new Decimal(l.totalAssessedValue ?? 0),
+      interestRateMonthly: new Decimal(l.interestRateMonthly ?? 0),
+      dueDate: new Date(l.dueDate),
+      lastSettledDate: new Date(l.lastSettledDate),
+    };
+
+    principalDisbursedTotal = principalDisbursedTotal.plus(loanObj.principalAmount);
+    const displayStatus = deriveLoanDisplayStatus(loanObj);
 
     if (displayStatus === "CLOSED") {
       closedLoanCount++;
     } else {
-      principalOutstandingTotal = principalOutstandingTotal.plus(l.principalOutstanding);
+      principalOutstandingTotal = principalOutstandingTotal.plus(loanObj.principalOutstanding);
       const accrued = computeAccruedInterest(
         {
-          principalOutstanding: l.principalOutstanding,
-          interestRateMonthly: l.interestRateMonthly,
-          lastSettledDate: l.lastSettledDate,
+          principalOutstanding: loanObj.principalOutstanding,
+          interestRateMonthly: loanObj.interestRateMonthly,
+          lastSettledDate: loanObj.lastSettledDate,
         },
         now
       );
@@ -1020,47 +1076,41 @@ export async function getPortfolioSummaryReport(
       }
     }
 
-    const hasGold = l.items.some((i) => i.metalType === "GOLD");
-    const hasSilver = l.items.some((i) => i.metalType === "SILVER");
+    const items: any[] = l.items || [];
+    const hasGold = items.some((i) => i.metalType === "GOLD");
+    const hasSilver = items.some((i) => i.metalType === "SILVER");
 
     if (hasGold) {
       goldLoansCount++;
-      goldAssessedValue = goldAssessedValue.plus(l.totalAssessedValue);
+      goldAssessedValue = goldAssessedValue.plus(loanObj.totalAssessedValue);
     }
     if (hasSilver && !hasGold) {
       silverLoansCount++;
-      silverAssessedValue = silverAssessedValue.plus(l.totalAssessedValue);
+      silverAssessedValue = silverAssessedValue.plus(loanObj.totalAssessedValue);
     }
   }
 
   // 2. Period metrics
-  const disbursementWhere: Prisma.LoanWhereInput = {};
-  if (start && end) disbursementWhere.loanDate = { gte: start, lte: end };
-  else if (start) disbursementWhere.loanDate = { gte: start };
-  else if (end) disbursementWhere.loanDate = { lte: end };
+  const disbursementWhere: any = {};
+  if (start && end) disbursementWhere.loanDate = { [Op.gte]: start, [Op.lte]: end };
+  else if (start) disbursementWhere.loanDate = { [Op.gte]: start };
+  else if (end) disbursementWhere.loanDate = { [Op.lte]: end };
 
-  const paymentWhere: Prisma.PaymentWhereInput = {};
-  if (start && end) paymentWhere.paymentDate = { gte: start, lte: end };
-  else if (start) paymentWhere.paymentDate = { gte: start };
-  else if (end) paymentWhere.paymentDate = { lte: end };
+  const paymentWhere: any = {};
+  if (start && end) paymentWhere.paymentDate = { [Op.gte]: start, [Op.lte]: end };
+  else if (start) paymentWhere.paymentDate = { [Op.gte]: start };
+  else if (end) paymentWhere.paymentDate = { [Op.lte]: end };
 
-  const [disbAgg, payAgg] = await Promise.all([
-    prisma.loan.aggregate({
-      where: Object.keys(disbursementWhere).length > 0 ? disbursementWhere : undefined,
-      _sum: { principalAmount: true },
-      _count: true,
-    }),
-    prisma.payment.aggregate({
-      where: Object.keys(paymentWhere).length > 0 ? paymentWhere : undefined,
-      _sum: {
-        amountPaid: true,
-        allocatedPrincipal: true,
-        allocatedInterest: true,
-        allocatedCharges: true,
-      },
-      _count: true,
-    }),
-  ]);
+  const [disbSum, disbCount, payCount, payTotal, payPrincipal, payInterest, payCharges] =
+    await Promise.all([
+      Loan.sum("principalAmount", { where: disbursementWhere }),
+      Loan.count({ where: disbursementWhere }),
+      Payment.count({ where: paymentWhere }),
+      Payment.sum("amountPaid", { where: paymentWhere }),
+      Payment.sum("allocatedPrincipal", { where: paymentWhere }),
+      Payment.sum("allocatedInterest", { where: paymentWhere }),
+      Payment.sum("allocatedCharges", { where: paymentWhere }),
+    ]);
 
   return {
     pointInTime: {
@@ -1080,13 +1130,13 @@ export async function getPortfolioSummaryReport(
     period: {
       startDate: start ? start.toISOString() : null,
       endDate: end ? end.toISOString() : null,
-      disbursementsCount: disbAgg._count,
-      disbursementsAmount: disbAgg._sum.principalAmount ?? new Decimal(0),
-      collectionsCount: payAgg._count,
-      collectionsAmount: payAgg._sum.amountPaid ?? new Decimal(0),
-      principalCollected: payAgg._sum.allocatedPrincipal ?? new Decimal(0),
-      interestCollected: payAgg._sum.allocatedInterest ?? new Decimal(0),
-      chargesCollected: payAgg._sum.allocatedCharges ?? new Decimal(0),
+      disbursementsCount: disbCount,
+      disbursementsAmount: new Decimal(disbSum || 0),
+      collectionsCount: payCount,
+      collectionsAmount: new Decimal(payTotal || 0),
+      principalCollected: new Decimal(payPrincipal || 0),
+      interestCollected: new Decimal(payInterest || 0),
+      chargesCollected: new Decimal(payCharges || 0),
     },
   };
 }
@@ -1133,14 +1183,14 @@ export async function getTransactionHistoryReport(
 ): Promise<TransactionHistoryResult> {
   const { start, end } = parseDateBounds(filter.startDate, filter.endDate);
 
-  const where: Prisma.LedgerEntryWhereInput = {};
+  const where: any = {};
 
   if (start && end) {
-    where.createdAt = { gte: start, lte: end };
+    where.createdAt = { [Op.gte]: start, [Op.lte]: end };
   } else if (start) {
-    where.createdAt = { gte: start };
+    where.createdAt = { [Op.gte]: start };
   } else if (end) {
-    where.createdAt = { lte: end };
+    where.createdAt = { [Op.lte]: end };
   }
 
   const selectedType = filter.type ?? filter.eventType;
@@ -1155,56 +1205,66 @@ export async function getTransactionHistoryReport(
   }
 
   if (filter.search && filter.search.trim()) {
-    const s = filter.search.trim();
-    where.OR = [
-      { loan: { loanNumber: { contains: s, mode: "insensitive" } } },
-      { loan: { customer: { fullName: { contains: s, mode: "insensitive" } } } },
-      { referenceId: { contains: s, mode: "insensitive" } },
-      { description: { contains: s, mode: "insensitive" } },
+    const s = `%${filter.search.trim()}%`;
+    where[Op.or] = [
+      { "$loan.loanNumber$": { [Op.like]: s } },
+      { "$loan.customer.fullName$": { [Op.like]: s } },
+      { referenceId: { [Op.like]: s } },
+      { description: { [Op.like]: s } },
     ];
   }
 
-  const entries = await prisma.ledgerEntry.findMany({
+  const rawEntries = await LedgerEntry.findAll({
     where,
-    include: {
-      loan: {
-        select: {
-          id: true,
-          loanNumber: true,
-          customer: { select: { id: true, fullName: true, phone: true } },
-        },
+    include: [
+      {
+        model: Loan,
+        as: "loan",
+        attributes: ["id", "loanNumber"],
+        include: [
+          {
+            model: Customer,
+            as: "customer",
+            attributes: ["id", "fullName", "phone"],
+          },
+        ],
       },
-      account: {
-        select: { id: true, code: true, name: true, type: true },
+      {
+        model: AccountMaster,
+        as: "account",
+        attributes: ["id", "code", "name", "type"],
       },
-    },
-    orderBy: { createdAt: "desc" },
+    ],
+    order: [["createdAt", "DESC"]],
   });
 
   let totalInflow = new Decimal(0);
   let totalOutflow = new Decimal(0);
 
-  const items: TransactionHistoryItem[] = entries.map((e) => {
+  const items: TransactionHistoryItem[] = rawEntries.map((rawE) => {
+    const e = rawE.toJSON() as any;
+    const amount = new Decimal(e.amount ?? 0);
+    const principalAfter = new Decimal(e.principalAfter ?? 0);
     const flow = classifyFlow(e.type);
-    if (flow === "INFLOW") totalInflow = totalInflow.plus(e.amount);
-    else if (flow === "OUTFLOW") totalOutflow = totalOutflow.plus(e.amount);
+    if (flow === "INFLOW") totalInflow = totalInflow.plus(amount);
+    else if (flow === "OUTFLOW") totalOutflow = totalOutflow.plus(amount);
 
     return {
       id: e.id,
-      createdAt: e.createdAt,
+      createdAt: new Date(e.createdAt),
       type: e.type,
       flow,
-      amount: e.amount,
-      principalAfter: e.principalAfter,
-      loanId: e.loan.id,
-      loanNumber: e.loan.loanNumber,
-      customerId: e.loan.customer.id,
-      customerName: e.loan.customer.fullName,
-      customerPhone: e.loan.customer.phone,
-      accountId: e.accountId,
+      amount,
+      principalAfter,
+      loanId: e.loan?.id ?? "",
+      loanNumber: e.loan?.loanNumber ?? "",
+      customerId: e.loan?.customer?.id ?? "",
+      customerName: e.loan?.customer?.fullName ?? "",
+      customerPhone: e.loan?.customer?.phone ?? "",
+      accountId: e.accountId ?? null,
       accountCode: e.account?.code ?? null,
       accountName: e.account?.name ?? null,
-      referenceId: e.referenceId,
+      referenceId: e.referenceId ?? null,
       description: e.description,
     };
   });

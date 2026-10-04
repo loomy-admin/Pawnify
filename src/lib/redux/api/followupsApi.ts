@@ -5,7 +5,7 @@ import {
   updateFollowUpStatusAction,
   deleteFollowUpAction,
 } from "@/app/(app)/followups/actions";
-import type { FollowUpStatus } from "@prisma/client";
+import type { FollowUpStatus } from "@/lib/db/types";
 
 export type FollowUpsData = Awaited<ReturnType<typeof getFollowUpsAction>>;
 

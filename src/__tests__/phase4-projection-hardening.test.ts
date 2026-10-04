@@ -1,5 +1,6 @@
+
 import { describe, it, expect } from "vitest";
-import { Prisma } from "@prisma/client";
+import Decimal from "decimal.js";
 import {
   projectMonetaryDecimal,
   projectMonetaryNumber,
@@ -10,28 +11,28 @@ import {
   projectReportsData,
   projectPanStatus,
 } from "@/lib/projection";
-import { prisma } from "@/lib/db";
+import { Loan, LoanItem, Payment, LedgerEntry } from "@/lib/db";
 
-const Decimal = Prisma.Decimal;
+
 
 function computePaymentWaterfall(
-  amountPaid: Prisma.Decimal,
-  unsettledCharges: Prisma.Decimal,
-  accruedInterest: Prisma.Decimal,
-  principalOutstanding: Prisma.Decimal
+  amountPaid: Decimal,
+  unsettledCharges: Decimal,
+  accruedInterest: Decimal,
+  principalOutstanding: Decimal
 ) {
-  let remaining = new Prisma.Decimal(amountPaid);
+  let remaining = new Decimal(amountPaid);
 
   // 1. Charges
-  const allocatedCharges = Prisma.Decimal.min(remaining, unsettledCharges);
+  const allocatedCharges = Decimal.min(remaining, unsettledCharges);
   remaining = remaining.minus(allocatedCharges);
 
   // 2. Interest
-  const allocatedInterest = Prisma.Decimal.min(remaining, accruedInterest);
+  const allocatedInterest = Decimal.min(remaining, accruedInterest);
   remaining = remaining.minus(allocatedInterest);
 
   // 3. Principal
-  const allocatedPrincipal = Prisma.Decimal.min(remaining, principalOutstanding);
+  const allocatedPrincipal = Decimal.min(remaining, principalOutstanding);
   remaining = remaining.minus(allocatedPrincipal);
 
   return {
@@ -429,21 +430,31 @@ describe("Phase 4: Centralized 50% Calculation Engine Hardening & Completeness",
   // ==================== STEP 17: LIVE DATABASE SAFETY ====================
   describe("Step 17: Live Database Immutability Verification", () => {
     it("proves that running projection on live DB objects does not mutate DB values", async () => {
-      const liveLoans = await prisma.loan.findMany({
-        take: 1,
-        include: { items: true, payments: true, transactions: true },
+      const liveLoans = await Loan.findAll({
+        limit: 1,
+        include: [
+          { model: LoanItem, as: "items" },
+          { model: Payment, as: "payments" },
+          { model: LedgerEntry, as: "transactions" },
+        ],
       });
 
       if (liveLoans.length === 0) return;
 
-      const loan = liveLoans[0];
+      const loanInst = liveLoans[0];
+      const loan = {
+        ...loanInst.toJSON(),
+        principalAmount: new Decimal(loanInst.principalAmount),
+        principalOutstanding: new Decimal(loanInst.principalOutstanding),
+        totalAssessedValue: new Decimal(loanInst.totalAssessedValue),
+      };
       const dbPrincipalBefore = loan.principalAmount.toString();
       const dbOutstandingBefore = loan.principalOutstanding.toString();
       const dbAssessedBefore = loan.totalAssessedValue.toString();
 
       // Project into both modes
-      const normal = projectLoan(loan, "NORMAL");
-      const fifty = projectLoan(loan, "FIFTY_PERCENT");
+      const normal = projectLoan(loan as any, "NORMAL");
+      const fifty = projectLoan(loan as any, "FIFTY_PERCENT");
 
       // Projections reflect correctly
       expect(normal.principalAmount.toString()).toBe(dbPrincipalBefore);
@@ -452,13 +463,11 @@ describe("Phase 4: Centralized 50% Calculation Engine Hardening & Completeness",
       );
 
       // Re-query database directly
-      const recheckedLoan = await prisma.loan.findUnique({
-        where: { id: loan.id },
-      });
+      const recheckedLoan = await Loan.findByPk(loan.id);
 
-      expect(recheckedLoan?.principalAmount.toString()).toBe(dbPrincipalBefore);
-      expect(recheckedLoan?.principalOutstanding.toString()).toBe(dbOutstandingBefore);
-      expect(recheckedLoan?.totalAssessedValue.toString()).toBe(dbAssessedBefore);
+      expect(new Decimal(recheckedLoan?.principalAmount ?? 0).toString()).toBe(dbPrincipalBefore);
+      expect(new Decimal(recheckedLoan?.principalOutstanding ?? 0).toString()).toBe(dbOutstandingBefore);
+      expect(new Decimal(recheckedLoan?.totalAssessedValue ?? 0).toString()).toBe(dbAssessedBefore);
     });
   });
 });

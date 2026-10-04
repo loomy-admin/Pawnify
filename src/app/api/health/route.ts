@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
+import { sequelize } from "@/lib/db";
 
 export async function GET() {
   try {
-    await prisma.$queryRaw`SELECT 1`;
+    await sequelize.authenticate();
     return NextResponse.json(
       {
         status: "healthy",

@@ -1,6 +1,5 @@
 import { betterAuth } from "better-auth";
-import { prismaAdapter } from "better-auth/adapters/prisma";
-import { prisma } from "@/lib/db";
+import mysql from "mysql2/promise";
 import { mobileAuthPlugin } from "./auth/mobile-plugin";
 
 const appUrl =
@@ -12,10 +11,19 @@ const appUrl =
     ? `https://${process.env.VERCEL_URL}`
     : "http://localhost:3000");
 
+const mysqlPool = mysql.createPool({
+  host: process.env.MYSQL_HOST || "127.0.0.1",
+  port: Number(process.env.MYSQL_PORT || 3306),
+  user: process.env.MYSQL_USER || "root",
+  password: process.env.MYSQL_PASSWORD || "",
+  database: process.env.MYSQL_DATABASE || "pawnify_db",
+  waitForConnections: true,
+  connectionLimit: Number(process.env.DB_POOL_MAX || 10),
+  queueLimit: 0,
+});
+
 export const auth = betterAuth({
-  database: prismaAdapter(prisma, {
-    provider: "postgresql",
-  }),
+  database: mysqlPool,
   secret:
     process.env.BETTER_AUTH_SECRET ||
     (process.env.NODE_ENV === "production"

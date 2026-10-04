@@ -3,24 +3,10 @@
  *
  * Dedicated server-side service for deriving an Account Ledger view on top
  * of the existing single-entry LedgerEntry system.
- *
- * DESIGN RULES (STRICTLY LOCKED):
- * 1. Single-entry model preserved (no debit/credit pairs, no second ledger).
- * 2. Pure derivation from AccountMaster -> LedgerEntry.accountId -> chronological entries.
- * 3. Never stores balances in the database or AccountMaster.
- * 4. Opening, running, and closing balances are calculated dynamically using Prisma.Decimal.
- * 5. Flow classification:
- *    PAYMENT      -> INFLOW (+ balance)
- *    DISBURSEMENT -> OUTFLOW (- balance)
- *    CLOSURE      -> NEUTRAL (no balance change)
- *    ITEM_RELEASE -> NEUTRAL (no balance change)
- * 6. Historical entries with accountId = NULL are excluded from account ledgers.
- * 7. Inactive accounts can still be viewed historically (inactivity only blocks new posting).
- * 8. 50% mode is presentation-only (projects monetary fields at presentation boundary).
  */
 
-import { prisma } from "@/lib/db";
-import { Prisma, TransactionType } from "@prisma/client";
+import Decimal from "decimal.js";
+import { LedgerEntry, Loan, Customer, AccountMaster, Op, TransactionType } from "@/lib/db";
 import { CalculationMode } from "@/lib/auth/session";
 import { projectMonetaryDecimal } from "@/lib/projection";
 import { classifyFlow, CashFlowDirection } from "@/lib/services/day-book";
@@ -45,9 +31,9 @@ export interface AccountLedgerItem {
   createdAt: Date;
   type: TransactionType;
   flow: CashFlowDirection;
-  amount: Prisma.Decimal;
-  principalAfter: Prisma.Decimal;
-  runningBalance: Prisma.Decimal;
+  amount: Decimal;
+  principalAfter: Decimal;
+  runningBalance: Decimal;
   loanId: string;
   loanNumber: string;
   customerId: string;
@@ -62,11 +48,11 @@ export interface AccountLedgerItem {
 }
 
 export interface AccountLedgerSummary {
-  openingBalance: Prisma.Decimal;
-  totalInflow: Prisma.Decimal;
-  totalOutflow: Prisma.Decimal;
-  netMovement: Prisma.Decimal;
-  closingBalance: Prisma.Decimal;
+  openingBalance: Decimal;
+  totalInflow: Decimal;
+  totalOutflow: Decimal;
+  netMovement: Decimal;
+  closingBalance: Decimal;
   transactionCount: number;
   paymentCount: number;
   disbursementCount: number;
@@ -132,46 +118,40 @@ export function normalizeDateBounds(
 
 /**
  * Derives the opening balance for an account prior to the given start date.
- * Uses exact Prisma.Decimal aggregation without loading prior historical rows.
  */
 export async function calculateOpeningBalance(
   accountId: string,
   startDate: Date | null
-): Promise<Prisma.Decimal> {
+): Promise<Decimal> {
   if (!startDate) {
-    return new Prisma.Decimal(0);
+    return new Decimal(0);
   }
 
-  const [paymentAgg, disbursementAgg] = await Promise.all([
-    prisma.ledgerEntry.aggregate({
+  const [paymentSum, disbursementSum] = await Promise.all([
+    LedgerEntry.sum("amount", {
       where: {
         accountId,
         type: "PAYMENT",
-        createdAt: { lt: startDate },
+        createdAt: { [Op.lt]: startDate },
       },
-      _sum: { amount: true },
     }),
-    prisma.ledgerEntry.aggregate({
+    LedgerEntry.sum("amount", {
       where: {
         accountId,
         type: "DISBURSEMENT",
-        createdAt: { lt: startDate },
+        createdAt: { [Op.lt]: startDate },
       },
-      _sum: { amount: true },
     }),
   ]);
 
-  const priorInflow = paymentAgg._sum.amount ?? new Prisma.Decimal(0);
-  const priorOutflow = disbursementAgg._sum.amount ?? new Prisma.Decimal(0);
+  const priorInflow = new Decimal(paymentSum || 0);
+  const priorOutflow = new Decimal(disbursementSum || 0);
 
   return priorInflow.minus(priorOutflow);
 }
 
 /**
  * Queries the Account Ledger for a specific AccountMaster account.
- *
- * @param filter AccountLedgerFilter with accountId, date range, eventType, etc.
- * @param mode CalculationMode ("NORMAL" or "FIFTY_PERCENT")
  */
 export async function getAccountLedger(
   filter: AccountLedgerFilter,
@@ -184,16 +164,8 @@ export async function getAccountLedger(
   const accountId = filter.accountId.trim();
 
   // 1. Verify account exists in AccountMaster
-  const account = await prisma.accountMaster.findUnique({
-    where: { id: accountId },
-    select: {
-      id: true,
-      code: true,
-      name: true,
-      type: true,
-      isActive: true,
-      description: true,
-    },
+  const account = await AccountMaster.findByPk(accountId, {
+    attributes: ["id", "code", "name", "type", "isActive", "description"],
   });
 
   if (!account) {
@@ -203,20 +175,20 @@ export async function getAccountLedger(
   // 2. Normalize date range bounds
   const { start, end, startStr, endStr } = normalizeDateBounds(filter.startDate, filter.endDate);
 
-  // 3. Compute Opening Balance (prior to start date) using exact Prisma.Decimal aggregation
+  // 3. Compute Opening Balance (prior to start date)
   const openingBalance = await calculateOpeningBalance(accountId, start);
 
   // 4. Build query for period entries
-  const where: Prisma.LedgerEntryWhereInput = {
+  const where: any = {
     accountId,
   };
 
   if (start && end) {
-    where.createdAt = { gte: start, lte: end };
+    where.createdAt = { [Op.gte]: start, [Op.lte]: end };
   } else if (start) {
-    where.createdAt = { gte: start };
+    where.createdAt = { [Op.gte]: start };
   } else if (end) {
-    where.createdAt = { lte: end };
+    where.createdAt = { [Op.lte]: end };
   }
 
   if (filter.eventType && filter.eventType !== "ALL") {
@@ -224,81 +196,73 @@ export async function getAccountLedger(
   }
 
   if (filter.search && filter.search.trim()) {
-    const q = filter.search.trim();
-    where.OR = [
-      { loan: { loanNumber: { contains: q, mode: "insensitive" } } },
-      { loan: { customer: { fullName: { contains: q, mode: "insensitive" } } } },
-      { referenceId: { contains: q, mode: "insensitive" } },
-      { description: { contains: q, mode: "insensitive" } },
+    const q = `%${filter.search.trim()}%`;
+    where[Op.or] = [
+      { "$loan.loanNumber$": { [Op.like]: q } },
+      { "$loan.customer.fullName$": { [Op.like]: q } },
+      { referenceId: { [Op.like]: q } },
+      { description: { [Op.like]: q } },
     ];
   }
 
-  // Always fetch in chronological ascending order to compute running balance correctly
-  const rawEntries = await prisma.ledgerEntry.findMany({
+  const rawEntries = await LedgerEntry.findAll({
     where,
-    orderBy: { createdAt: "asc" },
-    include: {
-      loan: {
-        select: {
-          id: true,
-          loanNumber: true,
-          customerId: true,
-          customer: {
-            select: {
-              id: true,
-              fullName: true,
-              phone: true,
-            },
+    order: [["createdAt", "ASC"]],
+    include: [
+      {
+        model: Loan,
+        as: "loan",
+        attributes: ["id", "loanNumber", "customerId"],
+        include: [
+          {
+            model: Customer,
+            as: "customer",
+            attributes: ["id", "fullName", "phone"],
           },
-        },
+        ],
       },
-      account: {
-        select: {
-          id: true,
-          code: true,
-          name: true,
-          type: true,
-        },
+      {
+        model: AccountMaster,
+        as: "account",
+        attributes: ["id", "code", "name", "type"],
       },
-    },
+    ],
   });
 
-  // 5. Calculate cumulative running balance and period KPIs using Prisma.Decimal
-  let currentBalance = new Prisma.Decimal(openingBalance);
-  let totalInflow = new Prisma.Decimal(0);
-  let totalOutflow = new Prisma.Decimal(0);
+  let currentBalance = new Decimal(openingBalance);
+  let totalInflow = new Decimal(0);
+  let totalOutflow = new Decimal(0);
   let paymentCount = 0;
   let disbursementCount = 0;
   let closureCount = 0;
   let itemReleaseCount = 0;
 
-  const entries: AccountLedgerItem[] = rawEntries.map((row) => {
+  const entries: AccountLedgerItem[] = rawEntries.map((item) => {
+    const row = item.toJSON() as any;
+    const amountDec = new Decimal(row.amount ?? 0);
+    const principalAfterDec = new Decimal(row.principalAfter ?? 0);
     const flow = classifyFlow(row.type);
 
     if (row.type === "PAYMENT") {
-      totalInflow = totalInflow.plus(row.amount);
-      currentBalance = currentBalance.plus(row.amount);
+      totalInflow = totalInflow.plus(amountDec);
+      currentBalance = currentBalance.plus(amountDec);
       paymentCount++;
     } else if (row.type === "DISBURSEMENT") {
-      totalOutflow = totalOutflow.plus(row.amount);
-      currentBalance = currentBalance.minus(row.amount);
+      totalOutflow = totalOutflow.plus(amountDec);
+      currentBalance = currentBalance.minus(amountDec);
       disbursementCount++;
     } else if (row.type === "CLOSURE") {
       closureCount++;
-      // NEUTRAL: no balance change
     } else if (row.type === "ITEM_RELEASE") {
       itemReleaseCount++;
-      // NEUTRAL: no balance change
     }
 
-    // Capture running balance at this point in time
     const runningBalance = currentBalance;
 
-    // Apply 50% presentation projection if session mode is FIFTY_PERCENT
     const displayAmount =
-      mode === "FIFTY_PERCENT" ? projectMonetaryDecimal(row.amount, mode) : row.amount;
+      mode === "FIFTY_PERCENT" ? projectMonetaryDecimal(amountDec, mode) : amountDec;
     const displayPrincipalAfter =
-      mode === "FIFTY_PERCENT" ? projectMonetaryDecimal(row.principalAfter, mode) : row.principalAfter;
+      mode === "FIFTY_PERCENT" ? projectMonetaryDecimal(principalAfterDec, mode) : principalAfterDec;
     const displayRunningBalance =
       mode === "FIFTY_PERCENT" ? projectMonetaryDecimal(runningBalance, mode) : runningBalance;
 
@@ -310,21 +274,20 @@ export async function getAccountLedger(
       amount: displayAmount,
       principalAfter: displayPrincipalAfter,
       runningBalance: displayRunningBalance,
-      loanId: row.loanId,
-      loanNumber: row.loan.loanNumber,
-      customerId: row.loan.customerId,
-      customerName: row.loan.customer.fullName,
-      customerPhone: row.loan.customer.phone,
+      loanId: row.loanId ?? "",
+      loanNumber: row.loan?.loanNumber ?? "",
+      customerId: row.loan?.customerId ?? "",
+      customerName: row.loan?.customer?.fullName ?? "",
+      customerPhone: row.loan?.customer?.phone ?? "",
       accountId: row.accountId!,
       accountCode: row.account?.code ?? account.code,
       accountName: row.account?.name ?? account.name,
       accountType: row.account?.type ?? account.type,
-      referenceId: row.referenceId,
+      referenceId: row.referenceId ?? null,
       description: row.description,
     };
   });
 
-  // If client requested desc order for display, reverse the array (runningBalance on each row is preserved)
   if (filter.sortOrder === "desc") {
     entries.reverse();
   }
@@ -332,7 +295,6 @@ export async function getAccountLedger(
   const netMovement = totalInflow.minus(totalOutflow);
   const closingBalance = openingBalance.plus(netMovement);
 
-  // 6. Build summary, projecting monetary fields only for presentation
   const summary: AccountLedgerSummary = {
     openingBalance:
       mode === "FIFTY_PERCENT" ? projectMonetaryDecimal(openingBalance, mode) : openingBalance,

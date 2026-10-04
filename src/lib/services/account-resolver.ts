@@ -14,51 +14,38 @@
  * 7. Do NOT silently create missing accounts.
  */
 
-import { prisma } from "@/lib/db";
-import { Prisma } from "@prisma/client";
-
-type DbClient = Prisma.TransactionClient | typeof prisma;
+import { AppSetting, AccountMaster, Op } from "@/lib/db";
+import type { Transaction } from "sequelize";
 
 const STANDARD_CASH_CODES = ["CASH-01", "CASH", "COUNTER-CASH"];
 
 /**
  * Resolves the active Counter Cash AccountMaster ID.
- *
- * Strategy:
- * 1. Check AppSetting for an explicit code override ("account.counter_cash.code" or "account.default.cash")
- * 2. If no setting exists, look up standard conventional cash codes (CASH-01, CASH, COUNTER-CASH) of type ASSET
- * 3. If still not matched, check for any active ASSET account named "Counter Cash" (case-insensitive)
- *
- * @param client Prisma client or active transaction client
- * @returns The AccountMaster ID
- * @throws Error if no Counter Cash account exists or if it is inactive
  */
-export async function resolveCounterCashAccount(client: DbClient = prisma): Promise<string> {
-  const account = await getCounterCashAccount(client);
+export async function resolveCounterCashAccount(transaction?: Transaction): Promise<string> {
+  const account = await getCounterCashAccount(transaction);
   return account.id;
 }
 
 /**
  * Retrieves the full AccountMaster record for the configured Counter Cash account.
- *
- * @param client Prisma client or active transaction client
- * @returns The AccountMaster record
- * @throws Error if not configured or inactive
  */
-export async function getCounterCashAccount(client: DbClient = prisma) {
+export async function getCounterCashAccount(transaction?: Transaction) {
   // 1. Check AppSetting override
-  const setting = await client.appSetting.findFirst({
+  const setting = await AppSetting.findOne({
     where: {
-      key: { in: ["account.counter_cash.code", "account.default.cash"] },
+      key: { [Op.in]: ["account.counter_cash.code", "account.default.cash"] },
     },
+    transaction,
   });
 
-  if (setting && setting.value.trim()) {
+  if (setting && setting.value && setting.value.trim()) {
     const configuredCode = setting.value.trim().toUpperCase();
-    const account = await client.accountMaster.findFirst({
+    const account = await AccountMaster.findOne({
       where: {
-        code: { equals: configuredCode, mode: "insensitive" },
+        code: configuredCode,
       },
+      transaction,
     });
 
     if (!account) {
@@ -78,11 +65,12 @@ export async function getCounterCashAccount(client: DbClient = prisma) {
 
   // 2. Lookup standard conventional codes in order
   for (const code of STANDARD_CASH_CODES) {
-    const account = await client.accountMaster.findFirst({
+    const account = await AccountMaster.findOne({
       where: {
-        code: { equals: code, mode: "insensitive" },
+        code,
         type: "ASSET",
       },
+      transaction,
     });
 
     if (account) {
@@ -96,11 +84,12 @@ export async function getCounterCashAccount(client: DbClient = prisma) {
   }
 
   // 3. Fallback: Search for ASSET account with name containing "Counter Cash"
-  const namedAccount = await client.accountMaster.findFirst({
+  const namedAccount = await AccountMaster.findOne({
     where: {
-      name: { contains: "Counter Cash", mode: "insensitive" },
+      name: { [Op.like]: "%Counter Cash%" },
       type: "ASSET",
     },
+    transaction,
   });
 
   if (namedAccount) {
@@ -112,8 +101,25 @@ export async function getCounterCashAccount(client: DbClient = prisma) {
     return namedAccount;
   }
 
+  // 3b. Dynamic Fallback: Search for ANY active ASSET account with name or code containing "Cash"
+  const generalCashAccount = await AccountMaster.findOne({
+    where: {
+      [Op.or]: [
+        { name: { [Op.like]: "%Cash%" } },
+        { code: { [Op.like]: "%CASH%" } },
+      ],
+      type: "ASSET",
+      isActive: true,
+    },
+    transaction,
+  });
+
+  if (generalCashAccount) {
+    return generalCashAccount;
+  }
+
   // 4. Missing: Fail safely with explicit business error
   throw new Error(
-    "Default Counter Cash account is not configured in Account Master. Please create an active Cash account (e.g. code 'CASH-01' or name 'Counter Cash') in Account Master."
+    "Default Counter Cash account is not configured in Account Master. Please create an active Cash account in Account Master."
   );
 }

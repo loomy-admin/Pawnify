@@ -1,7 +1,8 @@
 "use server";
 
 import { checkAuth } from "@/lib/auth/session";
-import { prisma } from "@/lib/db";
+import { Loan, LoanItem, Payment, LoanCharge } from "@/lib/db";
+import Decimal from "decimal.js";
 import { serializeForClient } from "@/lib/serialize";
 import {
   projectReportsData,
@@ -35,9 +36,6 @@ import {
   getTransactionHistoryReport,
   TransactionHistoryFilter,
 } from "@/lib/services/reports";
-import { Prisma } from "@prisma/client";
-
-const Decimal = Prisma.Decimal;
 
 /**
  * Legacy summary report action preserved for backwards compatibility.
@@ -48,12 +46,18 @@ export async function getReportsDataAction() {
     throw new Error(auth.error);
   }
 
-  const allLoans = await prisma.loan.findMany({
-    include: { items: { select: { metalType: true, assessedValue: true } } },
+  const allLoans = await Loan.findAll({
+    include: [
+      {
+        model: LoanItem,
+        as: "items",
+        attributes: ["metalType", "assessedValue"],
+      },
+    ],
   });
 
-  const allPayments = await prisma.payment.findMany();
-  const allCharges = await prisma.loanCharge.findMany();
+  const allPayments = await Payment.findAll();
+  const allCharges = await LoanCharge.findAll();
 
   let activeCount = 0;
   let overdueCount = 0;
@@ -71,15 +75,20 @@ export async function getReportsDataAction() {
 
   const today = new Date();
 
-  for (const loan of allLoans) {
-    const ltv = parseFloat(loan.ltvPercent.toString());
+  for (const rawLoan of allLoans) {
+    const loan = rawLoan.toJSON() as any;
+    const ltv = parseFloat((loan.ltvPercent ?? 0).toString());
+    const principalOutstanding = new Decimal(loan.principalOutstanding ?? 0);
+    const principalAmount = new Decimal(loan.principalAmount ?? 0);
+    const totalAssessedValue = new Decimal(loan.totalAssessedValue ?? 0);
+    const items: any[] = loan.items || [];
 
     if (loan.status === "CLOSED") {
       closedCount++;
     } else {
-      totalActiveAUM = totalActiveAUM.plus(loan.principalOutstanding);
+      totalActiveAUM = totalActiveAUM.plus(principalOutstanding);
       const graceDueDate = new Date(loan.dueDate);
-      graceDueDate.setDate(graceDueDate.getDate() + loan.gracePeriodDays);
+      graceDueDate.setDate(graceDueDate.getDate() + (loan.gracePeriodDays ?? 7));
       if (today > graceDueDate) overdueCount++;
       else activeCount++;
     }
@@ -88,16 +97,16 @@ export async function getReportsDataAction() {
     else if (ltv >= 80) ltv80Count++;
     else ltv75Count++;
 
-    const isGold = loan.items.some((i) => i.metalType === "GOLD");
-    const isSilver = loan.items.some((i) => i.metalType === "SILVER");
+    const isGold = items.some((i) => i.metalType === "GOLD");
+    const isSilver = items.some((i) => i.metalType === "SILVER");
 
     if (isGold) {
       goldLoansCount++;
-      goldAssessedValue = goldAssessedValue.plus(loan.totalAssessedValue);
+      goldAssessedValue = goldAssessedValue.plus(totalAssessedValue);
     }
     if (isSilver && !isGold) {
       silverLoansCount++;
-      silverAssessedValue = silverAssessedValue.plus(loan.totalAssessedValue);
+      silverAssessedValue = silverAssessedValue.plus(totalAssessedValue);
     }
   }
 
@@ -106,16 +115,18 @@ export async function getReportsDataAction() {
   let principalCollected = new Decimal(0);
   let chargesCollected = new Decimal(0);
 
-  for (const p of allPayments) {
-    totalCollected = totalCollected.plus(p.amountPaid);
-    interestCollected = interestCollected.plus(p.allocatedInterest);
-    principalCollected = principalCollected.plus(p.allocatedPrincipal);
-    chargesCollected = chargesCollected.plus(p.allocatedCharges);
+  for (const rawP of allPayments) {
+    const p = rawP.toJSON() as any;
+    totalCollected = totalCollected.plus(new Decimal(p.amountPaid ?? 0));
+    interestCollected = interestCollected.plus(new Decimal(p.allocatedInterest ?? 0));
+    principalCollected = principalCollected.plus(new Decimal(p.allocatedPrincipal ?? 0));
+    chargesCollected = chargesCollected.plus(new Decimal(p.allocatedCharges ?? 0));
   }
 
   let totalDisbursed = new Decimal(0);
-  for (const l of allLoans) {
-    totalDisbursed = totalDisbursed.plus(l.principalAmount);
+  for (const rawLoan of allLoans) {
+    const loan = rawLoan.toJSON() as any;
+    totalDisbursed = totalDisbursed.plus(new Decimal(loan.principalAmount ?? 0));
   }
 
   const rawReports = {

@@ -135,3 +135,74 @@ export async function getAccountByIdAction(id: string) {
     return { success: false, error: message };
   }
 }
+
+/**
+ * Server Action: Introduce lending capital to the shop pool.
+ * Authorization: ADMIN only.
+ */
+export async function introduceCapitalAction(data: {
+  amount: number | string;
+  source: string;
+  mode: any;
+  notes?: string;
+  accountId?: string;
+}) {
+  try {
+    const auth = await checkAdmin();
+    if (!auth.authenticated) {
+      return { success: false, error: auth.error };
+    }
+
+    const { introduceCapital } = await import("@/lib/services/capital");
+    const result = await introduceCapital({
+      amount: data.amount,
+      source: data.source,
+      mode: data.mode,
+      notes: data.notes,
+      accountId: data.accountId,
+      createdById: auth.user.id,
+    });
+
+    try {
+      revalidatePath("/admin/accounts");
+      revalidatePath("/day-book");
+      revalidatePath("/dashboard");
+    } catch {
+      // Safe fallback outside HTTP request
+    }
+
+    return { success: true, result };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Failed to introduce capital.";
+    return { success: false, error: message };
+  }
+}
+
+/**
+ * Server Action: Get available shop lending funds summary.
+ * Authorization: Authenticated.
+ */
+export async function getAvailableFundsAction() {
+  try {
+    const auth = await checkAuth();
+    if (!auth.authenticated) {
+      return { success: false, error: auth.error };
+    }
+
+    const { getAvailableLendingFunds } = await import("@/lib/services/capital");
+    const funds = await getAvailableLendingFunds();
+    return {
+      success: true,
+      funds: {
+        totalCapitalIntroduced: funds.totalCapitalIntroduced.toFixed(2),
+        totalDisbursed: funds.totalDisbursed.toFixed(2),
+        totalCollected: funds.totalCollected.toFixed(2),
+        totalReversed: funds.totalReversed.toFixed(2),
+        availableLendingFunds: funds.availableLendingFunds.toFixed(2),
+      },
+    };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Failed to compute available funds.";
+    return { success: false, error: message };
+  }
+}

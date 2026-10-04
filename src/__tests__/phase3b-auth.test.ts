@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { prisma } from "@/lib/db";
+import { User, Session, Account } from "@/lib/db";
 import { auth } from "@/lib/auth";
 import { verifyPassword, hashPassword } from "better-auth/crypto";
 import { isValidIndianMobile } from "@/lib/auth/mobile-plugin";
@@ -26,11 +26,11 @@ describe("Phase 3B: Mobile Authentication & Dual-Password Session Tests", () => 
 
   beforeAll(async () => {
     // Clean up any previous test user
-    const existing = await prisma.user.findFirst({ where: { phone: testPhone } });
+    const existing = await User.findOne({ where: {  phone: testPhone  } });
     if (existing) {
-      await prisma.session.deleteMany({ where: { userId: existing.id } });
-      await prisma.account.deleteMany({ where: { userId: existing.id } });
-      await prisma.user.delete({ where: { id: existing.id } });
+      await Session.destroy({ where: {  userId: existing.id  } });
+      await Account.destroy({ where: {  userId: existing.id  } });
+      await User.destroy({ where: {  id: existing.id  } });
     }
 
     // Create test user with both passwords
@@ -44,22 +44,22 @@ describe("Phase 3B: Mobile Authentication & Dual-Password Session Tests", () => 
     });
 
     testUserId = res.user.id;
-    await prisma.user.update({
-      where: { id: testUserId },
-      data: {
+    await User.update(
+      {
         phone: testPhone,
         hiddenPasswordHash: hiddenHash,
         role: "ADMIN",
         isActive: true,
       },
-    });
+      { where: { id: testUserId } }
+    );
   });
 
   afterAll(async () => {
     if (testUserId) {
-      await prisma.session.deleteMany({ where: { userId: testUserId } });
-      await prisma.account.deleteMany({ where: { userId: testUserId } });
-      await prisma.user.delete({ where: { id: testUserId } }).catch(() => {});
+      await Session.destroy({ where: {  userId: testUserId  } });
+      await Account.destroy({ where: {  userId: testUserId  } });
+      await User.destroy({ where: {  id: testUserId  } }).catch(() => {});
     }
   });
 
@@ -80,25 +80,23 @@ describe("Phase 3B: Mobile Authentication & Dual-Password Session Tests", () => 
   it("T4: Duplicate mobile number rejected", async () => {
     // Attempting to create or update another user with testPhone should violate unique constraint
     await expect(
-      prisma.user.create({
-        data: {
-          id: "dup-user-id",
-          name: "Duplicate User",
-          email: "duplicate@pawnify.com",
-          phone: testPhone,
-        },
+      User.create({
+        id: "dup-user-id",
+        name: "Duplicate User",
+        email: "duplicate@pawnify.com",
+        phone: testPhone,
       })
     ).rejects.toThrow();
   });
 
   it("T1: Normal password login sets calculationMode = NORMAL", async () => {
-    const user = await prisma.user.findUnique({
+    const user = await User.findOne({
       where: { phone: testPhone },
-      include: { accounts: true },
+      include: [{ model: Account, as: "accounts" }],
     });
     expect(user).toBeDefined();
 
-    const credentialAccount = user?.accounts.find((a) => a.providerId === "credential");
+    const credentialAccount = (user as any)?.accounts?.find((a: any) => a.providerId === "credential");
     expect(credentialAccount?.password).toBeDefined();
 
     const isNormalMatch = await verifyPassword({
@@ -117,12 +115,12 @@ describe("Phase 3B: Mobile Authentication & Dual-Password Session Tests", () => 
     expect(session.calculationMode).toBe("NORMAL");
 
     // Verify stored in DB
-    const dbSession = await prisma.session.findUnique({ where: { token: session.token } });
+    const dbSession = await Session.findOne({ where: { token: session.token } });
     expect(dbSession?.calculationMode).toBe("NORMAL");
   });
 
   it("T2: Hidden password login sets calculationMode = FIFTY_PERCENT", async () => {
-    const user = await prisma.user.findUnique({
+    const user = await User.findOne({
       where: { phone: testPhone },
     });
     expect(user?.hiddenPasswordHash).toBeDefined();
@@ -146,17 +144,17 @@ describe("Phase 3B: Mobile Authentication & Dual-Password Session Tests", () => 
     expect(session.calculationMode).toBe("FIFTY_PERCENT");
 
     // Verify stored in DB
-    const dbSession = await prisma.session.findUnique({ where: { token: session.token } });
+    const dbSession = await Session.findOne({ where: {  token: session.token  } });
     expect(dbSession?.calculationMode).toBe("FIFTY_PERCENT");
   });
 
   it("T3: Wrong password fails verification", async () => {
-    const user = await prisma.user.findUnique({
+    const user = await User.findOne({
       where: { phone: testPhone },
-      include: { accounts: true },
+      include: [{ model: Account, as: "accounts" }],
     });
 
-    const credentialAccount = user?.accounts.find((a) => a.providerId === "credential");
+    const credentialAccount = (user as any)?.accounts?.find((a: any) => a.providerId === "credential");
     const isNormalMatch = await verifyPassword({
       hash: credentialAccount!.password!,
       password: "incorrectPassword",
@@ -189,8 +187,8 @@ describe("Phase 3B: Mobile Authentication & Dual-Password Session Tests", () => 
       true
     );
 
-    const dbSessionA = await prisma.session.findUnique({ where: { token: sessionA.token } });
-    const dbSessionB = await prisma.session.findUnique({ where: { token: sessionB.token } });
+    const dbSessionA = await Session.findOne({ where: {  token: sessionA.token  } });
+    const dbSessionB = await Session.findOne({ where: {  token: sessionB.token  } });
 
     expect(dbSessionA?.calculationMode).toBe("NORMAL");
     expect(dbSessionB?.calculationMode).toBe("FIFTY_PERCENT");
@@ -205,22 +203,22 @@ describe("Phase 3B: Mobile Authentication & Dual-Password Session Tests", () => 
       calculationMode: "FIFTY_PERCENT",
     });
 
-    expect(await prisma.session.findUnique({ where: { token: session.token } })).toBeDefined();
+    expect(await Session.findOne({ where: {  token: session.token  } })).toBeDefined();
 
     // Invalidate
     await ctx.internalAdapter.deleteSession(session.token);
 
     // Verify destroyed
-    const afterLogout = await prisma.session.findUnique({ where: { token: session.token } });
+    const afterLogout = await Session.findOne({ where: {  token: session.token  } });
     expect(afterLogout).toBeNull();
   });
 
   it("T18 & T19: RBAC preserved in both calculation modes", async () => {
-    const adminUser = await prisma.user.findUnique({ where: { phone: testPhone } });
+    const adminUser = await User.findOne({ where: {  phone: testPhone  } });
     expect(adminUser?.role).toBe("ADMIN");
 
     // Staff user
-    const staffUser = await prisma.user.findUnique({ where: { phone: "9876543211" } });
+    const staffUser = await User.findOne({ where: {  phone: "9876543211"  } });
     expect(staffUser?.role).toBe("STAFF");
 
     // An admin retains role = ADMIN regardless of calculationMode
@@ -231,16 +229,7 @@ describe("Phase 3B: Mobile Authentication & Dual-Password Session Tests", () => 
 
   it("Security: Hidden and normal password hashes are NEVER exposed in client-facing data", async () => {
     // 1. Staff list action projection test
-    const staffMembers = await prisma.user.findMany({
-      include: {
-        _count: {
-          select: {
-            loansHandled: true,
-            paymentsCollected: true,
-          },
-        },
-      },
-    });
+    const staffMembers = await User.findAll();
 
     const clientStaffList = staffMembers.map((u) => ({
       id: u.id,
@@ -251,8 +240,8 @@ describe("Phase 3B: Mobile Authentication & Dual-Password Session Tests", () => 
       isActive: u.isActive,
       hasHiddenPassword: !!u.hiddenPasswordHash, // Boolean indicator only
       _count: {
-        loansHandled: u._count.loansHandled,
-        paymentsCollected: u._count.paymentsCollected,
+        loansHandled: 0,
+        paymentsCollected: 0,
       },
       createdAt: u.createdAt,
     }));
@@ -270,21 +259,15 @@ describe("Phase 3B: Mobile Authentication & Dual-Password Session Tests", () => 
     }
 
     // 2. Select query test
-    const user = await prisma.user.findUnique({
+    const user = await User.findOne({
       where: { phone: testPhone },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        phone: true,
-        isActive: true,
-      },
+      attributes: ["id", "name", "email", "role", "phone", "isActive"],
     });
 
-    expect(user).not.toHaveProperty("hiddenPasswordHash");
-    expect(user).not.toHaveProperty("password");
-    expect(user).not.toHaveProperty("passwordHash");
+    const userJson = user?.toJSON();
+    expect(userJson).not.toHaveProperty("hiddenPasswordHash");
+    expect(userJson).not.toHaveProperty("password");
+    expect(userJson).not.toHaveProperty("passwordHash");
   });
 
   it("Security: Client cannot tamper with calculationMode via body, query, or headers", async () => {
@@ -299,7 +282,7 @@ describe("Phase 3B: Mobile Authentication & Dual-Password Session Tests", () => 
     );
 
     // Verify session in DB is FIFTY_PERCENT
-    const dbSession = await prisma.session.findUnique({
+    const dbSession = await Session.findOne({
       where: { token: session.token },
     });
     expect(dbSession?.calculationMode).toBe("FIFTY_PERCENT");
@@ -322,7 +305,7 @@ describe("Phase 3B: Mobile Authentication & Dual-Password Session Tests", () => 
       { calculationMode: "NORMAL" },
       true
     );
-    const dbNormalSession = await prisma.session.findUnique({
+    const dbNormalSession = await Session.findOne({
       where: { token: normalSession.token },
     });
     const maliciousClientBody2 = {

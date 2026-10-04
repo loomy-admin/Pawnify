@@ -9,7 +9,7 @@ import {
 import { getCustomersListAction } from "@/app/(app)/customers/actions";
 import { createCustomerAction } from "@/app/(app)/customers/new/actions";
 import type { CustomerFilters } from "@/lib/services/customers";
-import { KycStatus } from "@prisma/client";
+import { KycStatus } from "@/lib/db/types";
 
 export type CustomerDetail = Awaited<ReturnType<typeof getCustomerDetailAction>>;
 export type CustomersListResult = Awaited<ReturnType<typeof getCustomersListAction>>;

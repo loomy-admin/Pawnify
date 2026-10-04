@@ -6,11 +6,8 @@
  * Client-side auto-calculation is UX convenience only; these functions are the source of truth.
  */
 
-import { Prisma } from "@prisma/client";
-import { prisma } from "@/lib/db";
-
-const Decimal = Prisma.Decimal;
-type Decimal = Prisma.Decimal;
+import Decimal from "decimal.js";
+import { AppSetting, Op } from "@/lib/db";
 
 // ==================== Purity Reference Table ====================
 // Standardized purity values — hardcoded lookup for common standards,
@@ -112,10 +109,10 @@ export const DEFAULT_LTV_SLABS: LtvSlab[] = [
  * Settings keys: ltv.tier1.max, ltv.tier1.percent, ltv.tier2.max, ltv.tier2.percent, ltv.tier3.percent
  */
 export async function getLtvSlabs(): Promise<LtvSlab[]> {
-  const settings = await prisma.appSetting.findMany({
+  const settings = await AppSetting.findAll({
     where: {
       key: {
-        startsWith: "ltv.",
+        [Op.like]: "ltv.%",
       },
     },
   });

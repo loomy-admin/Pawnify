@@ -2,10 +2,8 @@
 
 import { revalidatePath } from "next/cache";
 import { checkAuth } from "@/lib/auth/session";
-import { prisma } from "@/lib/db";
-import { FollowUpStatus } from "@prisma/client";
+import { FollowUp, Loan, Customer, User, FollowUpStatus } from "@/lib/db";
 import { serializeForClient } from "@/lib/serialize";
-
 import { projectMonetaryString } from "@/lib/projection";
 
 export async function getFollowUpsAction(tab: string) {
@@ -14,63 +12,80 @@ export async function getFollowUpsAction(tab: string) {
     throw new Error(auth.error);
   }
 
-  const [followUps, activeLoans] = await Promise.all([
-    prisma.followUp.findMany({
+  const [rawFollowUps, rawActiveLoans] = await Promise.all([
+    FollowUp.findAll({
       where: tab === "DONE" ? { status: "DONE" } : { status: "PENDING" },
-      include: {
-        loan: {
-          select: {
-            id: true,
-            loanNumber: true,
-            principalOutstanding: true,
-            dueDate: true,
-            customer: { select: { fullName: true, phone: true } },
-          },
+      include: [
+        {
+          model: Loan,
+          as: "loan",
+          attributes: ["id", "loanNumber", "principalOutstanding", "dueDate"],
+          include: [
+            {
+              model: Customer,
+              as: "customer",
+              attributes: ["fullName", "phone"],
+            },
+          ],
         },
-        assignedTo: { select: { name: true } },
-      },
-      orderBy: { dueDate: "asc" },
+        {
+          model: User,
+          as: "assignedTo",
+          attributes: ["name"],
+        },
+      ],
+      order: [["dueDate", "ASC"]],
     }),
-    prisma.loan.findMany({
+    Loan.findAll({
       where: { status: "ACTIVE" },
-      select: {
-        id: true,
-        loanNumber: true,
-        customer: { select: { fullName: true } },
-      },
-      orderBy: { createdAt: "desc" },
+      attributes: ["id", "loanNumber"],
+      include: [
+        {
+          model: Customer,
+          as: "customer",
+          attributes: ["fullName"],
+        },
+      ],
+      order: [["createdAt", "DESC"]],
     }),
   ]);
 
-  const activeLoanOptions = activeLoans.map((l) => ({
-    id: l.id,
-    loanNumber: l.loanNumber,
-    customerName: l.customer.fullName,
-  }));
+  const activeLoanOptions = rawActiveLoans.map((rawL) => {
+    const l = rawL.toJSON() as any;
+    return {
+      id: l.id,
+      loanNumber: l.loanNumber,
+      customerName: l.customer?.fullName ?? "",
+    };
+  });
 
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  const formattedFollowUps = followUps.map((f) => ({
-    id: f.id,
-    dueDate: f.dueDate.toISOString(),
-    loanId: f.loanId,
-    loan: {
-      loanNumber: f.loan.loanNumber,
-      principalOutstanding: projectMonetaryString(
-        f.loan.principalOutstanding.toString(),
-        auth.calculationMode
-      ),
-      customer: {
-        fullName: f.loan.customer.fullName,
-        phone: f.loan.customer.phone,
+  const formattedFollowUps = rawFollowUps.map((rawF) => {
+    const f = rawF.toJSON() as any;
+    const dueDate = new Date(f.dueDate);
+    return {
+      id: f.id,
+      dueDate: dueDate.toISOString(),
+      loanId: f.loanId,
+      loan: {
+        loanNumber: f.loan?.loanNumber ?? "",
+        principalOutstanding: projectMonetaryString(
+          (f.loan?.principalOutstanding ?? 0).toString(),
+          auth.calculationMode
+        ),
+        customer: {
+          fullName: f.loan?.customer?.fullName ?? "",
+          phone: f.loan?.customer?.phone ?? "",
+        },
       },
-    },
-    note: f.note,
-    assignedToName: f.assignedTo?.name || "Unassigned",
-    status: f.status,
-    isOverdueTask: tab === "PENDING" && new Date(f.dueDate) < today,
-  }));
+      note: f.note,
+      assignedToName: f.assignedTo?.name || "Unassigned",
+      status: f.status,
+      isOverdueTask: tab === "PENDING" && dueDate < today,
+    };
+  });
 
   return serializeForClient({ followUps: formattedFollowUps, activeLoanOptions });
 }
@@ -86,14 +101,12 @@ export async function createFollowUpAction(loanId: string, note: string, dueDate
   }
 
   try {
-    await prisma.followUp.create({
-      data: {
-        loanId,
-        note: note.trim(),
-        dueDate: new Date(dueDateStr),
-        status: "PENDING",
-        assignedToId: auth.user.id,
-      },
+    await FollowUp.create({
+      loanId,
+      note: note.trim(),
+      dueDate: new Date(dueDateStr),
+      status: "PENDING",
+      assignedToId: auth.user.id,
     });
 
     revalidatePath("/followups");
@@ -112,12 +125,10 @@ export async function updateFollowUpStatusAction(id: string, status: FollowUpSta
   }
 
   try {
-    const f = await prisma.followUp.update({
-      where: { id },
-      data: {
-        status,
-      },
-    });
+    const f = await FollowUp.findByPk(id);
+    if (!f) return { success: false, error: "Follow-up not found" };
+
+    await f.update({ status });
 
     revalidatePath("/followups");
     revalidatePath(`/loans/${f.loanId}`);
@@ -135,12 +146,14 @@ export async function deleteFollowUpAction(id: string) {
   }
 
   try {
-    const f = await prisma.followUp.delete({
-      where: { id },
-    });
+    const f = await FollowUp.findByPk(id);
+    if (!f) return { success: false, error: "Follow-up not found" };
+
+    const loanId = f.loanId;
+    await f.destroy();
 
     revalidatePath("/followups");
-    revalidatePath(`/loans/${f.loanId}`);
+    revalidatePath(`/loans/${loanId}`);
     return { success: true };
   } catch (err: unknown) {
     console.error("Delete follow-up error:", err);

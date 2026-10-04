@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { checkAuth, checkAdmin } from "@/lib/auth/session";
-import { prisma } from "@/lib/db";
+import { AppSetting } from "@/lib/db";
 import { updateSetting } from "@/lib/services/settings";
 import { serializeForClient } from "@/lib/serialize";
 
@@ -12,7 +12,7 @@ export async function getSettingsAction() {
     throw new Error(adminAuth.error);
   }
 
-  const allSettings = await prisma.appSetting.findMany();
+  const allSettings = await AppSetting.findAll();
   const settingsMap: Record<string, string> = {};
   for (const s of allSettings) {
     settingsMap[s.key] = s.value;

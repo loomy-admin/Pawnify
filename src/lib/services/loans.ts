@@ -2,14 +2,30 @@
  * Loan Service — Creation, Queries, Status Derivation, Closure
  *
  * Handles the full loan lifecycle from creation through closure and item release.
- * All valuations are recomputed server-side (Non-Negotiable #5).
- * Closure is a two-step process: financial close + physical item release (§6.5).
+ * All valuations are recomputed server-side.
+ * Closure is a two-step process: financial close + physical item release.
  */
 
-import { Prisma, MetalType, PaymentMode, LoanStatus } from "@prisma/client";
-import { prisma, runSerializable } from "@/lib/db";
-import { debugLog } from "@/lib/debug";
+import Decimal from "decimal.js";
 import { addMonths } from "date-fns";
+import type { Transaction } from "sequelize";
+import {
+  Loan,
+  LoanItem,
+  LoanCharge,
+  Payment,
+  LedgerEntry,
+  FollowUp,
+  Customer,
+  User,
+  AppSetting,
+  Op,
+  runTransaction,
+  MetalType,
+  PaymentMode,
+  LoanStatus,
+} from "@/lib/db";
+import { debugLog } from "@/lib/debug";
 import {
   computeItemValuation,
   getLtvSlabs,
@@ -19,9 +35,6 @@ import {
 import { computeAccruedInterest, computeInterestSummary } from "./interest";
 import { writeLedgerEntry } from "@/lib/ledger-writer";
 import { resolveCounterCashAccount } from "@/lib/services/account-resolver";
-
-const Decimal = Prisma.Decimal;
-type Decimal = Prisma.Decimal;
 
 // ==================== Types ====================
 
@@ -49,35 +62,49 @@ export interface CreateLoanInput {
   loanDate?: Date;
   processingFee?: string | number;
   disbursementMode?: PaymentMode;
+  loanType?: "STANDARD" | "CUMULATIVE";
+  cumulativeFrequency?: "MONTHLY" | "QUARTERLY" | "HALF_YEARLY" | "YEARLY";
+  cumulativeTreatment?: "ADD_TO_CAPITAL" | "KEEP_SEPARATE";
+  asDraft?: boolean;
 }
 
-export type LoanDisplayStatus = "ACTIVE" | "OVERDUE" | "CLOSED";
+export type LoanDisplayStatus = "DRAFT" | "APPROVED" | "ACTIVE" | "OVERDUE" | "CLOSED" | "CANCELLED";
 
 // ==================== Loan Number Generation ====================
 
-async function generateLoanNumber(tx: Prisma.TransactionClient): Promise<string> {
+async function generateLoanNumber(transaction?: Transaction): Promise<string> {
   const year = new Date().getFullYear();
-  const count = await tx.loan.count({
+  const latestLoan = await Loan.findOne({
     where: {
       loanNumber: {
-        startsWith: `PL-${year}`,
+        [Op.like]: `PL-${year}-%`,
       },
     },
+    order: [["loanNumber", "DESC"]],
+    transaction,
   });
-  return `PL-${year}-${String(count + 1).padStart(6, "0")}`;
+
+  let nextSeq = 1;
+  if (latestLoan && latestLoan.loanNumber) {
+    const parts = latestLoan.loanNumber.split("-");
+    const lastNum = parseInt(parts[2], 10);
+    if (!isNaN(lastNum)) {
+      nextSeq = lastNum + 1;
+    }
+  }
+  return `PL-${year}-${String(nextSeq).padStart(6, "0")}`;
 }
 
 // ==================== Status Derivation ====================
 
-/**
- * "Overdue" is derived, not stored — computed from ACTIVE status + due date + grace period.
- * This avoids needing a scheduled job and can never drift out of sync with the calendar.
- */
 export function deriveLoanDisplayStatus(loan: {
-  status: LoanStatus;
+  status: LoanStatus | "DRAFT" | "APPROVED" | "ACTIVE" | "CLOSED" | "CANCELLED";
   dueDate: Date;
   gracePeriodDays: number;
 }): LoanDisplayStatus {
+  if (loan.status === "DRAFT") return "DRAFT";
+  if (loan.status === "APPROVED") return "APPROVED";
+  if (loan.status === "CANCELLED") return "CANCELLED";
   if (loan.status === "CLOSED") return "CLOSED";
 
   const today = new Date();
@@ -93,8 +120,8 @@ export function deriveLoanDisplayStatus(loan: {
 export async function createLoan(input: CreateLoanInput) {
   const loanDate = input.loanDate || new Date();
 
-  return await runSerializable(async (tx) => {
-    // 1. Recompute all item valuations server-side (Non-Negotiable #5)
+  return await runTransaction(async (t) => {
+    // 1. Recompute all item valuations server-side
     const computedItems = input.items.map((item) => {
       const valuation = computeItemValuation({
         grossWeightGrams: item.grossWeightGrams,
@@ -116,7 +143,7 @@ export async function createLoan(input: CreateLoanInput) {
     const ltvPercent = getLtvPercent(totalAssessedValue, slabs);
     const eligibleAmount = computeEligibleAmount(totalAssessedValue, ltvPercent);
 
-    // 4. Validate principal ≤ eligible
+    // 4. Validate principal <= eligible
     const principalAmount = new Decimal(input.principalAmount);
     if (principalAmount.gt(eligibleAmount)) {
       throw new Error(
@@ -131,107 +158,172 @@ export async function createLoan(input: CreateLoanInput) {
     const dueDate = addMonths(loanDate, input.tenureMonths);
 
     // 6. Generate loan number
-    const loanNumber = await generateLoanNumber(tx);
+    const loanNumber = await generateLoanNumber(t);
+
+    const isDraft = Boolean(input.asDraft);
+    const status = isDraft ? "DRAFT" : "ACTIVE";
 
     // 7. Create Loan
-    const loan = await tx.loan.create({
-      data: {
+    const loan = await Loan.create(
+      {
         loanNumber,
         customerId: input.customerId,
         handledById: input.handledById,
         loanDate,
         dueDate,
         tenureMonths: input.tenureMonths,
-        interestRateMonthly: new Decimal(input.interestRateMonthly),
-        ltvPercent,
+        interestRateMonthly: new Decimal(input.interestRateMonthly).toString(),
+        ltvPercent: ltvPercent.toString(),
         gracePeriodDays: input.gracePeriodDays ?? 7,
-        totalAssessedValue,
-        principalAmount,
-        principalOutstanding: principalAmount,
+        totalAssessedValue: totalAssessedValue.toString(),
+        principalAmount: principalAmount.toString(),
+        principalOutstanding: principalAmount.toString(),
         lastSettledDate: loanDate,
-        items: {
-          create: computedItems.map((item) => ({
-            metalType: item.metalType,
-            description: item.description,
-            purityLabel: item.purityLabel,
-            purityPercent: new Decimal(item.purityPercent),
-            grossWeightGrams: new Decimal(item.grossWeightGrams),
-            stoneWeightGrams: new Decimal(item.stoneWeightGrams),
-            netWeightGrams: item.netWeightGrams,
-            fineWeightGrams: item.fineWeightGrams,
-            valuationRatePerGram: new Decimal(item.valuationRatePerGram),
-            assessedValue: item.assessedValue,
-            packetNumber: item.packetNumber,
-            storageLocation: item.storageLocation,
-            photoUrl: item.photoUrl,
-          })),
-        },
+        loanType: input.loanType || "STANDARD",
+        cumulativeFrequency: input.cumulativeFrequency || null,
+        cumulativeTreatment: input.cumulativeTreatment || null,
+        status,
+        disbursedAt: isDraft ? null : loanDate,
+        disbursedById: isDraft ? null : input.handledById,
       },
-      include: { items: true },
-    });
+      { transaction: t }
+    );
 
-    // 8. Processing fee charge (optional)
+    // 8. Create items
+    for (const item of computedItems) {
+      await LoanItem.create(
+        {
+          loanId: loan.id,
+          metalType: item.metalType as any,
+          description: item.description,
+          purityLabel: item.purityLabel,
+          purityPercent: new Decimal(item.purityPercent).toString(),
+          grossWeightGrams: new Decimal(item.grossWeightGrams).toString(),
+          stoneWeightGrams: new Decimal(item.stoneWeightGrams).toString(),
+          netWeightGrams: item.netWeightGrams.toString(),
+          fineWeightGrams: item.fineWeightGrams.toString(),
+          valuationRatePerGram: new Decimal(item.valuationRatePerGram).toString(),
+          assessedValue: item.assessedValue.toString(),
+          packetNumber: item.packetNumber,
+          storageLocation: item.storageLocation,
+          photoUrl: item.photoUrl,
+        },
+        { transaction: t }
+      );
+    }
+
+    // 9. Processing fee charge (optional)
     if (input.processingFee) {
       const fee = new Decimal(input.processingFee);
       if (fee.gt(new Decimal(0))) {
-        await tx.loanCharge.create({
-          data: {
+        await LoanCharge.create(
+          {
             loanId: loan.id,
             chargeType: "PROCESSING_FEE",
-            amount: fee,
+            amount: fee.toString(),
           },
-        });
+          { transaction: t }
+        );
       }
     }
 
-    // 9. Disbursement ledger entry (account-aware Counter Cash posting)
-    const counterCashAccountId = await resolveCounterCashAccount(tx);
-    await writeLedgerEntry(tx, {
-      loanId: loan.id,
-      type: "DISBURSEMENT",
-      amount: principalAmount,
-      principalAfter: principalAmount,
-      accountId: counterCashAccountId,
-      description: `Loan ${loanNumber} disbursed — ₹${principalAmount.toString()} against ${computedItems.length} item(s) valued at ₹${totalAssessedValue.toString()} (LTV: ${ltvPercent.toString()}%)`,
-    });
+    // 10. Disbursement ledger entry (only if loan is disbursed / not a draft)
+    if (!isDraft) {
+      const counterCashAccountId = await resolveCounterCashAccount(t);
+      await writeLedgerEntry(t, {
+        loanId: loan.id,
+        type: "DISBURSEMENT",
+        amount: principalAmount,
+        principalAfter: principalAmount,
+        accountId: counterCashAccountId,
+        description: `Loan ${loanNumber} disbursed — ₹${principalAmount.toString()} against ${computedItems.length} item(s) valued at ₹${totalAssessedValue.toString()} (LTV: ${ltvPercent.toString()}%)`,
+      });
+    }
 
     debugLog(
       "loans",
-      `createLoan: ${loanNumber} principal=${principalAmount.toString()} ltv=${ltvPercent.toString()}%`
+      `createLoan: ${loanNumber} status=${status} principal=${principalAmount.toString()} ltv=${ltvPercent.toString()}%`
     );
 
-    return loan;
+    const fullLoan = await Loan.findByPk(loan.id, {
+      include: [{ model: LoanItem, as: "items" }],
+      transaction: t,
+    });
+
+    return fullLoan ? fullLoan.toJSON() : loan.toJSON();
   });
 }
 
 // ==================== Loan Queries ====================
 
 export async function getLoanById(id: string) {
-  const loan = await prisma.loan.findUnique({
-    where: { id },
-    include: {
-      customer: true,
-      handledBy: { select: { id: true, name: true, email: true } },
-    },
+  const loanInstance = await Loan.findByPk(id, {
+    include: [
+      { model: Customer, as: "customer" },
+      { model: User, as: "handledBy", attributes: ["id", "name", "email"] },
+    ],
   });
 
-  if (!loan) return null;
+  if (!loanInstance) return null;
+
+  const loan = loanInstance.toJSON() as any;
 
   const [items, payments, charges, transactions, followUps] = await Promise.all([
-    prisma.loanItem.findMany({ where: { loanId: id }, orderBy: { createdAt: "asc" } }),
-    prisma.payment.findMany({ where: { loanId: id }, orderBy: { createdAt: "desc" } }),
-    prisma.loanCharge.findMany({ where: { loanId: id }, orderBy: { createdAt: "asc" } }),
-    prisma.ledgerEntry.findMany({ where: { loanId: id }, orderBy: { createdAt: "asc" } }),
-    prisma.followUp.findMany({ where: { loanId: id }, orderBy: { dueDate: "asc" } }),
+    LoanItem.findAll({ where: { loanId: id }, order: [["createdAt", "ASC"]] }),
+    Payment.findAll({ where: { loanId: id }, order: [["createdAt", "DESC"]] }),
+    LoanCharge.findAll({ where: { loanId: id }, order: [["createdAt", "ASC"]] }),
+    LedgerEntry.findAll({ where: { loanId: id }, order: [["createdAt", "ASC"]] }),
+    FollowUp.findAll({ where: { loanId: id }, order: [["dueDate", "ASC"]] }),
   ]);
 
   const fullLoan = {
     ...loan,
-    items,
-    payments,
-    charges,
-    transactions,
-    followUps,
+    principalOutstanding: new Decimal(loan.principalOutstanding ?? 0),
+    principalAmount: new Decimal(loan.principalAmount ?? 0),
+    totalAssessedValue: new Decimal(loan.totalAssessedValue ?? 0),
+    interestRateMonthly: new Decimal(loan.interestRateMonthly ?? 0),
+    ltvPercent: new Decimal(loan.ltvPercent ?? 0),
+    lastSettledDate: new Date(loan.lastSettledDate),
+    dueDate: new Date(loan.dueDate),
+    items: items.map((i) => {
+      const it = i.toJSON() as any;
+      return {
+        ...it,
+        assessedValue: new Decimal(it.assessedValue ?? 0),
+        purityPercent: new Decimal(it.purityPercent ?? 0),
+        grossWeightGrams: new Decimal(it.grossWeightGrams ?? 0),
+        stoneWeightGrams: new Decimal(it.stoneWeightGrams ?? 0),
+        netWeightGrams: new Decimal(it.netWeightGrams ?? 0),
+        fineWeightGrams: new Decimal(it.fineWeightGrams ?? 0),
+        valuationRatePerGram: new Decimal(it.valuationRatePerGram ?? 0),
+      };
+    }),
+    payments: payments.map((p) => {
+      const py = p.toJSON() as any;
+      return {
+        ...py,
+        amountPaid: new Decimal(py.amountPaid ?? 0),
+        allocatedCharges: new Decimal(py.allocatedCharges ?? 0),
+        allocatedInterest: new Decimal(py.allocatedInterest ?? 0),
+        allocatedPrincipal: new Decimal(py.allocatedPrincipal ?? 0),
+      };
+    }),
+    charges: charges.map((c) => {
+      const ch = c.toJSON() as any;
+      return {
+        ...ch,
+        amount: new Decimal(ch.amount ?? 0),
+      };
+    }),
+    transactions: transactions.map((t) => {
+      const tx = t.toJSON() as any;
+      return {
+        ...tx,
+        amount: new Decimal(tx.amount ?? 0),
+        principalAfter: new Decimal(tx.principalAfter ?? 0),
+      };
+    }),
+    followUps: followUps.map((f) => f.toJSON()),
   };
 
   const displayStatus = deriveLoanDisplayStatus(fullLoan);
@@ -245,8 +337,8 @@ export async function getLoanById(id: string) {
     .plus(interestSummary.accruedInterest)
     .plus(
       fullLoan.charges
-        .filter((c) => !c.isSettled)
-        .reduce((sum, c) => sum.plus(c.amount), new Decimal(0))
+        .filter((c: any) => !c.isSettled)
+        .reduce((sum: Decimal, c: any) => sum.plus(c.amount), new Decimal(0))
     );
 
   return {
@@ -260,7 +352,7 @@ export async function getLoanById(id: string) {
 export interface LoanFilters {
   status?: LoanDisplayStatus;
   customerId?: string;
-  search?: string; // loan number, packet number, customer name
+  search?: string;
   metalType?: MetalType;
   dateFrom?: Date;
   dateTo?: Date;
@@ -272,9 +364,8 @@ export interface LoanFilters {
 export async function getLoans(filters: LoanFilters = {}) {
   const { page = 1, pageSize = 20 } = filters;
 
-  const where: Prisma.LoanWhereInput = {};
+  const where: any = {};
 
-  // Status filter — for OVERDUE, we filter ACTIVE and then filter in-memory
   if (filters.status === "CLOSED") {
     where.status = "CLOSED";
   } else if (filters.status === "ACTIVE" || filters.status === "OVERDUE") {
@@ -291,58 +382,63 @@ export async function getLoans(filters: LoanFilters = {}) {
 
   if (filters.dateFrom || filters.dateTo) {
     where.loanDate = {};
-    if (filters.dateFrom) where.loanDate.gte = filters.dateFrom;
-    if (filters.dateTo) where.loanDate.lte = filters.dateTo;
+    if (filters.dateFrom) where.loanDate[Op.gte] = filters.dateFrom;
+    if (filters.dateTo) where.loanDate[Op.lte] = filters.dateTo;
   }
 
-  if (filters.search) {
-    where.OR = [
-      { loanNumber: { contains: filters.search, mode: "insensitive" } },
-      {
-        customer: {
-          OR: [
-            { fullName: { contains: filters.search, mode: "insensitive" } },
-            { phone: { contains: filters.search } },
-          ],
-        },
-      },
-      {
-        items: {
-          some: {
-            packetNumber: { contains: filters.search, mode: "insensitive" },
-          },
-        },
-      },
+  const includeItems: any = {
+    model: LoanItem,
+    as: "items",
+    attributes: ["metalType", "packetNumber"],
+  };
+
+  if (filters.metalType) {
+    includeItems.where = { metalType: filters.metalType };
+  }
+
+  if (filters.search && filters.search.trim()) {
+    const q = `%${filters.search.trim()}%`;
+    where[Op.or] = [
+      { loanNumber: { [Op.like]: q } },
+      { "$customer.fullName$": { [Op.like]: q } },
+      { "$customer.phone$": { [Op.like]: q } },
+      { "$items.packetNumber$": { [Op.like]: q } },
     ];
   }
 
-  if (filters.metalType) {
-    where.items = { some: { metalType: filters.metalType } };
-  }
+  const include = [
+    {
+      model: Customer,
+      as: "customer",
+      attributes: ["id", "fullName", "phone"],
+    },
+    {
+      model: User,
+      as: "handledBy",
+      attributes: ["id", "name"],
+    },
+    includeItems,
+  ];
 
-  const include = {
-    customer: { select: { id: true, fullName: true, phone: true } },
-    handledBy: { select: { id: true, name: true } },
-    items: { select: { metalType: true, packetNumber: true } },
-  } satisfies Prisma.LoanInclude;
-
-  // ACTIVE vs OVERDUE is derived per-row from dueDate + gracePeriodDays (see
-  // deriveLoanDisplayStatus), which Prisma's query builder can't express as a
-  // WHERE clause. DB-level skip/take before that filter would return a
-  // wrong/incomplete page and a total that doesn't match what's displayed, so
-  // for these two statuses we fetch every matching ACTIVE loan and paginate
-  // in memory instead of trusting the DB to do it.
   if (filters.status === "ACTIVE" || filters.status === "OVERDUE") {
-    const allMatching = await prisma.loan.findMany({
+    const allMatching = await Loan.findAll({
       where,
       include,
-      orderBy: { createdAt: "desc" },
+      order: [["createdAt", "DESC"]],
     });
 
-    const filtered = allMatching
-      .map((loan) => ({ ...loan, displayStatus: deriveLoanDisplayStatus(loan) }))
-      .filter((l) => l.displayStatus === filters.status);
+    const parsed = allMatching.map((l) => {
+      const loan = l.toJSON() as any;
+      return {
+        ...loan,
+        principalOutstanding: new Decimal(loan.principalOutstanding ?? 0),
+        principalAmount: new Decimal(loan.principalAmount ?? 0),
+        dueDate: new Date(loan.dueDate),
+        displayStatus: deriveLoanDisplayStatus(loan),
+      };
+    });
 
+    const filtered = parsed.filter((l) => l.displayStatus === filters.status);
     const total = filtered.length;
     const skip = (page - 1) * pageSize;
 
@@ -356,19 +452,26 @@ export async function getLoans(filters: LoanFilters = {}) {
   }
 
   const skip = (page - 1) * pageSize;
-  const [loans, total] = await Promise.all([
-    prisma.loan.findMany({
-      where,
-      include,
-      orderBy: { createdAt: "desc" },
-      skip,
-      take: pageSize,
-    }),
-    prisma.loan.count({ where }),
-  ]);
+  const { rows, count: total } = await Loan.findAndCountAll({
+    where,
+    include,
+    order: [["createdAt", "DESC"]],
+    offset: skip,
+    limit: pageSize,
+    distinct: true,
+  });
 
   return {
-    loans: loans.map((loan) => ({ ...loan, displayStatus: deriveLoanDisplayStatus(loan) })),
+    loans: rows.map((l) => {
+      const loan = l.toJSON() as any;
+      return {
+        ...loan,
+        principalOutstanding: new Decimal(loan.principalOutstanding ?? 0),
+        principalAmount: new Decimal(loan.principalAmount ?? 0),
+        dueDate: new Date(loan.dueDate),
+        displayStatus: deriveLoanDisplayStatus(loan),
+      };
+    }),
     total,
     page,
     pageSize,
@@ -378,54 +481,60 @@ export async function getLoans(filters: LoanFilters = {}) {
 
 // ==================== Loan Closure (§6.5) ====================
 
-/**
- * Close a loan. Requires principal outstanding = 0 and all charges settled.
- * Closure is a financial event — item release is a separate operational step.
- */
 export async function closeLoan(loanId: string, closedById: string) {
-  return await prisma.$transaction(async (tx) => {
-    const loan = await tx.loan.findUnique({
-      where: { id: loanId },
-      include: { charges: { where: { isSettled: false } } },
+  return await runTransaction(async (t) => {
+    const loan = await Loan.findByPk(loanId, {
+      include: [
+        {
+          model: LoanCharge,
+          as: "charges",
+          where: { isSettled: false },
+          required: false,
+        },
+      ],
+      transaction: t,
     });
 
     if (!loan) throw new Error("Loan not found");
     if (loan.status !== "ACTIVE") throw new Error("Loan is already closed");
-    if (loan.principalOutstanding.gt(new Decimal(0))) {
+
+    const outstanding = new Decimal(loan.principalOutstanding);
+    if (outstanding.gt(new Decimal(0))) {
       throw new Error(
-        `Cannot close loan: ₹${loan.principalOutstanding.toString()} principal still outstanding`
+        `Cannot close loan: ₹${outstanding.toString()} principal still outstanding`
       );
     }
-    if (loan.charges.length > 0) {
+
+    const charges = (loan as any).charges || [];
+    if (charges.length > 0) {
       throw new Error("Cannot close loan: unsettled charges remain");
     }
 
-    // Check if there's accrued interest
     const accrued = computeAccruedInterest(
       {
-        principalOutstanding: loan.principalOutstanding,
-        interestRateMonthly: loan.interestRateMonthly,
-        lastSettledDate: loan.lastSettledDate,
+        principalOutstanding: outstanding,
+        interestRateMonthly: new Decimal(loan.interestRateMonthly),
+        lastSettledDate: new Date(loan.lastSettledDate),
       },
       new Date()
     );
-    // Principal is 0, so accrued should be 0 — but verify
+
     if (accrued.gt(new Decimal("0.01"))) {
       throw new Error(`Cannot close loan: ₹${accrued.toString()} interest still accrued`);
     }
 
     const now = new Date();
 
-    await tx.loan.update({
-      where: { id: loanId },
-      data: {
+    await loan.update(
+      {
         status: "CLOSED",
         closedAt: now,
         closedById,
       },
-    });
+      { transaction: t }
+    );
 
-    await writeLedgerEntry(tx, {
+    await writeLedgerEntry(t, {
       loanId,
       type: "CLOSURE",
       amount: new Decimal(0),
@@ -438,15 +547,11 @@ export async function closeLoan(loanId: string, closedById: string) {
   });
 }
 
-/**
- * Release items — sets releasedAt on all items for a closed loan.
- * This is the physical hand-back of collateral, separate from financial closure.
- */
 export async function releaseItems(loanId: string) {
-  return await prisma.$transaction(async (tx) => {
-    const loan = await tx.loan.findUnique({
-      where: { id: loanId },
-      include: { items: true },
+  return await runTransaction(async (t) => {
+    const loan = await Loan.findByPk(loanId, {
+      include: [{ model: LoanItem, as: "items" }],
+      transaction: t,
     });
 
     if (!loan) throw new Error("Loan not found");
@@ -454,25 +559,32 @@ export async function releaseItems(loanId: string) {
       throw new Error("Cannot release items: loan is not closed");
     }
 
-    const alreadyReleased = loan.items.every((i) => i.releasedAt !== null);
+    const items: LoanItem[] = (loan as any).items || [];
+    const alreadyReleased = items.length > 0 && items.every((i) => i.releasedAt !== null);
     if (alreadyReleased) {
       throw new Error("Items have already been released");
     }
 
     const now = new Date();
 
-    await tx.loanItem.updateMany({
-      where: { loanId, releasedAt: null },
-      data: { releasedAt: now },
-    });
+    await LoanItem.update(
+      { releasedAt: now },
+      {
+        where: {
+          loanId,
+          releasedAt: null,
+        },
+        transaction: t,
+      }
+    );
 
-    await writeLedgerEntry(tx, {
+    await writeLedgerEntry(t, {
       loanId,
       type: "ITEM_RELEASE",
       amount: new Decimal(0),
       principalAfter: new Decimal(0),
       accountId: null,
-      description: `${loan.items.length} item(s) released to customer`,
+      description: `${items.length} item(s) released to customer`,
     });
 
     return { releasedAt: now };
@@ -482,15 +594,163 @@ export async function releaseItems(loanId: string) {
 // ==================== Default Interest Rate ====================
 
 export async function getDefaultInterestRate(): Promise<string> {
-  const setting = await prisma.appSetting.findUnique({
-    where: { key: "interest.default.monthly" },
-  });
+  const setting = await AppSetting.findByPk("interest.default.monthly");
   return setting?.value ?? "1.500";
 }
 
 export async function getDefaultGracePeriod(): Promise<number> {
-  const setting = await prisma.appSetting.findUnique({
-    where: { key: "grace.period.days" },
-  });
+  const setting = await AppSetting.findByPk("grace.period.days");
   return setting ? parseInt(setting.value) : 7;
+}
+
+// ==================== Lifecycle Actions: Approve, Disburse, Cancel ====================
+
+export async function approveLoan(loanId: string, approvedById: string, approvalNotes?: string) {
+  return await runTransaction(async (t) => {
+    const loan = await Loan.findByPk(loanId, { transaction: t });
+    if (!loan) throw new Error("Loan not found");
+    if (loan.status !== "DRAFT") {
+      throw new Error(`Cannot approve loan: status is ${loan.status} (expected DRAFT)`);
+    }
+
+    const now = new Date();
+    await loan.update(
+      {
+        status: "APPROVED",
+        approvedAt: now,
+        approvedById,
+        approvalNotes: approvalNotes || null,
+      },
+      { transaction: t }
+    );
+
+    return { approvedAt: now, status: "APPROVED" };
+  });
+}
+
+export async function disburseApprovedLoan(
+  loanId: string,
+  handledById: string,
+  disbursementMode?: PaymentMode
+) {
+  return await runTransaction(async (t) => {
+    const loan = await Loan.findByPk(loanId, {
+      include: [{ model: LoanItem, as: "items" }],
+      transaction: t,
+    });
+    if (!loan) throw new Error("Loan not found");
+    if (loan.status !== "APPROVED") {
+      throw new Error(`Cannot disburse loan: status is ${loan.status} (expected APPROVED)`);
+    }
+
+    const now = new Date();
+    await loan.update(
+      {
+        status: "ACTIVE",
+        disbursedAt: now,
+        disbursedById: handledById,
+      },
+      { transaction: t }
+    );
+
+    // Write disbursement ledger entry
+    const counterCashAccountId = await resolveCounterCashAccount(t);
+    const principalAmount = new Decimal(loan.principalAmount);
+    const items = (loan as any).items || [];
+    await writeLedgerEntry(t, {
+      loanId: loan.id,
+      type: "DISBURSEMENT",
+      amount: principalAmount,
+      principalAfter: principalAmount,
+      accountId: counterCashAccountId,
+      description: `Loan ${loan.loanNumber} disbursed — ₹${principalAmount.toString()} against ${items.length} item(s)`,
+    });
+
+    return { disbursedAt: now, status: "ACTIVE" };
+  });
+}
+
+export async function cancelDraftLoan(loanId: string, cancelledById: string, cancellationReason: string) {
+  return await runTransaction(async (t) => {
+    const loan = await Loan.findByPk(loanId, { transaction: t });
+    if (!loan) throw new Error("Loan not found");
+    if (loan.status !== "DRAFT" && loan.status !== "APPROVED") {
+      throw new Error(
+        `Cannot cancel loan: status is ${loan.status} (only DRAFT or APPROVED loans can be cancelled)`
+      );
+    }
+
+    const now = new Date();
+    await loan.update(
+      {
+        status: "CANCELLED",
+        cancelledAt: now,
+        cancelledById,
+        cancellationReason,
+      },
+      { transaction: t }
+    );
+
+    return { cancelledAt: now, status: "CANCELLED" };
+  });
+}
+
+// ==================== Preclosure Quotation ====================
+
+export async function getPreclosureQuote(loanId: string, asOfDate: Date = new Date()) {
+  const loanInstance = await Loan.findByPk(loanId, {
+    include: [
+      {
+        model: LoanCharge,
+        as: "charges",
+        where: { isSettled: false },
+        required: false,
+      },
+      {
+        model: Customer,
+        as: "customer",
+        attributes: ["id", "fullName", "phone"],
+      },
+    ],
+  });
+
+  if (!loanInstance) throw new Error("Loan not found");
+  if (loanInstance.status !== "ACTIVE") throw new Error("Loan is not active");
+
+  const principal = new Decimal(loanInstance.principalOutstanding);
+  const accruedInterest = computeAccruedInterest(
+    {
+      principalOutstanding: principal,
+      interestRateMonthly: new Decimal(loanInstance.interestRateMonthly),
+      lastSettledDate: new Date(loanInstance.lastSettledDate),
+      loanType: loanInstance.loanType,
+      cumulativeFrequency: loanInstance.cumulativeFrequency,
+      cumulativeTreatment: loanInstance.cumulativeTreatment,
+    },
+    asOfDate
+  );
+
+  const charges: LoanCharge[] = (loanInstance as any).charges || [];
+  const unsettledChargesTotal = charges.reduce(
+    (sum, c) => sum.plus(new Decimal(c.amount)),
+    new Decimal(0)
+  );
+
+  const settlementAmount = principal.plus(accruedInterest).plus(unsettledChargesTotal);
+
+  return {
+    loanId: loanInstance.id,
+    loanNumber: loanInstance.loanNumber,
+    customer: (loanInstance as any).customer,
+    quoteDate: asOfDate,
+    principalOutstanding: principal,
+    accruedInterest,
+    unsettledCharges: charges.map((c) => ({
+      id: c.id,
+      chargeType: c.chargeType,
+      amount: new Decimal(c.amount),
+    })),
+    unsettledChargesTotal,
+    settlementAmount,
+  };
 }

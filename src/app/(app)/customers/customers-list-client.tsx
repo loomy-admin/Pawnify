@@ -31,7 +31,7 @@ function CustomersListContent() {
     _count: {
       loans: c._count.loans,
     },
-    kycDocuments: c.kycDocuments.map((d) => ({ status: d.status })),
+    kycDocuments: (c.kycDocuments || []).map((d: any) => ({ status: d.status })),
   }));
 
   const handleFilterSubmit = (e: React.FormEvent<HTMLFormElement>) => {

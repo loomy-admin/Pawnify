@@ -7,7 +7,7 @@ import {
   useDeleteFollowUpMutation,
 } from "@/lib/redux/api/followupsApi";
 import { Plus, CheckCircle2, Clock, Loader2, Calendar, AlertCircle, Trash2 } from "lucide-react";
-import { FollowUpStatus } from "@prisma/client";
+import { FollowUpStatus } from "@/lib/db/types";
 import {
   Dialog,
   DialogContent,

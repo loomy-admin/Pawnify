@@ -1,9 +1,9 @@
 /**
- * Customer Service — CRUD, Search, KYC Management
+ * Customer Service — CRUD, Search, KYC Management (Sequelize MySQL)
  */
 
-import { Prisma, KycStatus } from "@prisma/client";
-import { prisma } from "@/lib/db";
+import { Op } from "sequelize";
+import { Customer, KycDocument, Loan, User, AppSetting, sequelize } from "@/lib/db";
 
 // ==================== Types ====================
 
@@ -34,92 +34,122 @@ export interface CustomerFilters {
 // ==================== CRUD ====================
 
 export async function createCustomer(data: CustomerCreateData, staffId: string) {
-  return await prisma.customer.create({
-    data: {
-      fullName: data.fullName,
-      phone: data.phone,
-      email: data.email || null,
-      dob: data.dob ? new Date(data.dob) : null,
-      addressLine1: data.addressLine1,
-      addressLine2: data.addressLine2 || null,
-      city: data.city,
-      state: data.state,
-      pincode: data.pincode,
-      photoUrl: data.photoUrl || null,
-      createdById: staffId,
-      kycDocuments: data.kycDocuments?.length
-        ? {
-            create: data.kycDocuments.map((doc) => ({
-              docType: doc.docType,
-              docNumber: doc.docNumber,
-              fileUrl: doc.fileUrl || null,
-            })),
-          }
-        : undefined,
-    },
-    include: { kycDocuments: true },
+  return await sequelize.transaction(async (t) => {
+    const customer = await Customer.create(
+      {
+        fullName: data.fullName,
+        phone: data.phone,
+        email: data.email || null,
+        dob: data.dob ? new Date(data.dob) : null,
+        addressLine1: data.addressLine1,
+        addressLine2: data.addressLine2 || null,
+        city: data.city,
+        state: data.state,
+        pincode: data.pincode,
+        photoUrl: data.photoUrl || null,
+        createdById: staffId,
+      },
+      { transaction: t }
+    );
+
+    if (data.kycDocuments?.length) {
+      await KycDocument.bulkCreate(
+        data.kycDocuments.map((doc) => ({
+          customerId: customer.id,
+          docType: doc.docType,
+          docNumber: doc.docNumber,
+          fileUrl: doc.fileUrl || null,
+        })),
+        { transaction: t }
+      );
+    }
+
+    const created = await Customer.findByPk(customer.id, {
+      include: [{ model: KycDocument, as: "kycDocuments" }],
+      transaction: t,
+    });
+    return created?.toJSON();
   });
 }
 
 export async function getCustomers(filters: CustomerFilters = {}) {
   const { page = 1, pageSize = 20, search } = filters;
-  const skip = (page - 1) * pageSize;
+  const offset = (page - 1) * pageSize;
 
-  const where: Prisma.CustomerWhereInput = {};
+  const whereClause: Record<string, unknown> = {};
 
   if (search) {
-    where.OR = [
-      { fullName: { contains: search, mode: "insensitive" } },
-      { phone: { contains: search } },
-      { email: { contains: search, mode: "insensitive" } },
+    whereClause[Op.or as unknown as string] = [
+      { fullName: { [Op.like]: `%${search}%` } },
+      { phone: { [Op.like]: `%${search}%` } },
+      { email: { [Op.like]: `%${search}%` } },
     ];
   }
 
-  const [customers, total] = await Promise.all([
-    prisma.customer.findMany({
-      where,
-      include: {
-        kycDocuments: { select: { docType: true, status: true } },
-        _count: { select: { loans: true } },
+  const { rows, count } = await Customer.findAndCountAll({
+    where: whereClause,
+    include: [
+      {
+        model: KycDocument,
+        as: "kycDocuments",
+        attributes: ["docType", "status"],
       },
-      orderBy: { createdAt: "desc" },
-      skip,
-      take: pageSize,
-    }),
-    prisma.customer.count({ where }),
-  ]);
+      {
+        model: Loan,
+        as: "loans",
+        attributes: ["id"],
+      },
+    ],
+    order: [["createdAt", "DESC"]],
+    limit: pageSize,
+    offset,
+    distinct: true,
+  });
+
+  const customers = rows.map((c) => {
+    const json = c.toJSON() as any;
+    json._count = { loans: json.loans?.length || 0 };
+    return json;
+  });
 
   return {
     customers,
-    total,
+    total: count,
     page,
     pageSize,
-    totalPages: Math.ceil(total / pageSize),
+    totalPages: Math.ceil(count / pageSize),
   };
 }
 
 export async function getCustomerById(id: string) {
-  return await prisma.customer.findUnique({
-    where: { id },
-    include: {
-      kycDocuments: true,
-      createdBy: { select: { id: true, name: true } },
-      loans: {
-        orderBy: { createdAt: "desc" },
-        select: {
-          id: true,
-          loanNumber: true,
-          loanDate: true,
-          dueDate: true,
-          gracePeriodDays: true,
-          principalAmount: true,
-          principalOutstanding: true,
-          status: true,
-          totalAssessedValue: true,
-        },
+  const customer = await Customer.findByPk(id, {
+    include: [
+      { model: KycDocument, as: "kycDocuments" },
+      {
+        model: User,
+        as: "createdBy",
+        attributes: ["id", "name"],
       },
-    },
+      {
+        model: Loan,
+        as: "loans",
+        attributes: [
+          "id",
+          "loanNumber",
+          "loanDate",
+          "dueDate",
+          "gracePeriodDays",
+          "principalAmount",
+          "principalOutstanding",
+          "status",
+          "totalAssessedValue",
+        ],
+        order: [["createdAt", "DESC"]],
+      },
+    ],
   });
+
+  return customer ? (customer.toJSON() as any) : null;
 }
 
 /**
@@ -128,31 +158,38 @@ export async function getCustomerById(id: string) {
 export async function searchCustomers(query: string, limit = 10) {
   if (!query || query.length < 2) return [];
 
-  return await prisma.customer.findMany({
+  const customers = await Customer.findAll({
     where: {
-      OR: [{ fullName: { contains: query, mode: "insensitive" } }, { phone: { contains: query } }],
+      [Op.or]: [
+        { fullName: { [Op.like]: `%${query}%` } },
+        { phone: { [Op.like]: `%${query}%` } },
+      ],
     },
-    select: {
-      id: true,
-      fullName: true,
-      phone: true,
-      city: true,
-    },
-    take: limit,
-    orderBy: { fullName: "asc" },
+    attributes: ["id", "fullName", "phone", "city"],
+    limit,
+    order: [["fullName", "ASC"]],
   });
+
+  return customers.map((c) => c.toJSON());
 }
 
 // ==================== KYC ====================
 
-export async function updateKycStatus(docId: string, status: KycStatus, verifiedById: string) {
-  return await prisma.kycDocument.update({
-    where: { id: docId },
-    data: {
+export async function updateKycStatus(
+  docId: string,
+  status: "PENDING" | "VERIFIED" | "REJECTED",
+  verifiedById: string
+) {
+  await KycDocument.update(
+    {
       status,
       verifiedById: status !== "PENDING" ? verifiedById : null,
     },
-  });
+    { where: { id: docId } }
+  );
+
+  const updated = await KycDocument.findByPk(docId);
+  return updated ? updated.toJSON() : null;
 }
 
 export async function addKycDocument(
@@ -161,14 +198,13 @@ export async function addKycDocument(
   docNumber: string,
   fileUrl?: string
 ) {
-  return await prisma.kycDocument.create({
-    data: {
-      customerId,
-      docType,
-      docNumber,
-      fileUrl: fileUrl || null,
-    },
+  const created = await KycDocument.create({
+    customerId,
+    docType,
+    docNumber,
+    fileUrl: fileUrl || null,
   });
+  return created.toJSON();
 }
 
 /**
@@ -180,24 +216,18 @@ export async function checkPanRequired(customerId: string): Promise<{
   hasPan: boolean;
   threshold: number;
 }> {
-  const setting = await prisma.appSetting.findUnique({
-    where: { key: "pan.threshold" },
-  });
+  const setting = await AppSetting.findByPk("pan.threshold");
   const threshold = setting ? parseFloat(setting.value) : 50000;
 
-  const [panDoc, totalDisbursed] = await Promise.all([
-    prisma.kycDocument.findFirst({
-      where: { customerId, docType: "PAN" },
-    }),
-    prisma.loan.aggregate({
-      where: { customerId, status: "ACTIVE" },
-      _sum: { principalAmount: true },
-    }),
-  ]);
+  const panDoc = await KycDocument.findOne({
+    where: { customerId, docType: "PAN" },
+  });
 
-  const totalAmount = totalDisbursed._sum.principalAmount
-    ? parseFloat(totalDisbursed._sum.principalAmount.toString())
-    : 0;
+  const totalDisbursed = (await Loan.sum("principalAmount", {
+    where: { customerId, status: "ACTIVE" },
+  })) || 0;
+
+  const totalAmount = Number(totalDisbursed);
 
   return {
     required: totalAmount >= threshold,

@@ -10,8 +10,8 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
-import { prisma } from "@/lib/db";
-import { Prisma } from "@prisma/client";
+import { User, Customer, Loan, LedgerEntry, Op } from "@/lib/db";
+import Decimal from "decimal.js";
 
 // Mock auth session helpers for testing server action RBAC
 vi.mock("@/lib/auth/session", () => ({
@@ -36,17 +36,15 @@ describe("Phase 12: System Hardening & Immutability", () => {
 
   beforeAll(async () => {
     // Locate or create test ADMIN user
-    let admin = await prisma.user.findFirst({ where: { role: "ADMIN", isActive: true } });
+    let admin = await User.findOne({ where: { role: "ADMIN", isActive: true } });
     if (!admin) {
-      admin = await prisma.user.create({
-        data: {
-          id: `admin-phase12-${Date.now()}`,
-          name: "Test Admin Phase 12",
-          email: `admin-phase12-${Date.now()}@pawnify.test`,
-          role: "ADMIN",
-          phone: "9999990012",
-          isActive: true,
-        },
+      admin = await User.create({
+        id: `admin-phase12-${Date.now()}`,
+        name: "Test Admin Phase 12",
+        email: `admin-phase12-${Date.now()}@pawnify.test`,
+        role: "ADMIN",
+        phone: "9999990012",
+        isActive: true,
       });
     }
     adminUserId = admin.id;
@@ -67,44 +65,40 @@ describe("Phase 12: System Hardening & Immutability", () => {
     });
 
     // Create a customer with a loan and ledger entry
-    const customer = await prisma.customer.create({
-      data: {
-        fullName: "Hardening Customer Test",
-        phone: "9876541234",
-        addressLine1: "123 Hardening St",
-        city: "Hyderabad",
-        state: "Telangana",
-        pincode: "500001",
-        createdById: adminUserId,
-      },
+    const customer = await Customer.create({
+      fullName: "Hardening Customer Test",
+      phone: "9876541234",
+      addressLine1: "123 Hardening St",
+      city: "Hyderabad",
+      state: "Telangana",
+      pincode: "500001",
+      createdById: adminUserId,
     });
     testCustomer = { id: customer.id };
 
-    const loan = await prisma.loan.create({
-      data: {
-        loanNumber: `HARDEN-${Date.now()}`,
-        customerId: customer.id,
-        principalAmount: new Prisma.Decimal("50000"),
-        principalOutstanding: new Prisma.Decimal("50000"),
-        interestRateMonthly: new Prisma.Decimal("1.5"),
-        totalAssessedValue: new Prisma.Decimal("70000"),
-        ltvPercent: new Prisma.Decimal("71.4"),
-        tenureMonths: 12,
-        loanDate: new Date(),
-        dueDate: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
-        lastSettledDate: new Date(),
-        status: "ACTIVE",
-        handledById: adminUserId,
-      },
+    const loan = await Loan.create({
+      loanNumber: `HARDEN-${Date.now()}`,
+      customerId: customer.id,
+      principalAmount: "50000",
+      principalOutstanding: "50000",
+      interestRateMonthly: "1.5",
+      totalAssessedValue: "70000",
+      ltvPercent: "71.4",
+      tenureMonths: 12,
+      loanDate: new Date(),
+      dueDate: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+      lastSettledDate: new Date(),
+      status: "ACTIVE",
+      handledById: adminUserId,
     });
     testLoan = { id: loan.id };
 
     // Write a DISBURSEMENT ledger entry for this loan
-    await writeLedgerEntry(prisma, {
+    await writeLedgerEntry(undefined, {
       loanId: loan.id,
       type: "DISBURSEMENT",
-      amount: new Prisma.Decimal("50000"),
-      principalAfter: new Prisma.Decimal("50000"),
+      amount: new Decimal("50000"),
+      principalAfter: new Decimal("50000"),
       description: "Disbursement for hardening test loan",
     });
   });
@@ -112,11 +106,11 @@ describe("Phase 12: System Hardening & Immutability", () => {
   afterAll(async () => {
     // Clean up test records
     if (testLoan?.id) {
-      await prisma.ledgerEntry.deleteMany({ where: { loanId: testLoan.id } });
-      await prisma.loan.deleteMany({ where: { id: testLoan.id } });
+      await LedgerEntry.destroy({ where: { loanId: testLoan.id } });
+      await Loan.destroy({ where: { id: testLoan.id } });
     }
     if (testCustomer?.id) {
-      await prisma.customer.deleteMany({ where: { id: testCustomer.id } });
+      await Customer.destroy({ where: { id: testCustomer.id } });
     }
   });
 
@@ -126,10 +120,10 @@ describe("Phase 12: System Hardening & Immutability", () => {
     expect(result.error).toContain("immutable");
 
     // Verify loan and ledgerEntry still exist in DB
-    const loanInDb = await prisma.loan.findUnique({ where: { id: testLoan.id } });
+    const loanInDb = await Loan.findByPk(testLoan.id);
     expect(loanInDb).not.toBeNull();
 
-    const ledgerInDb = await prisma.ledgerEntry.count({ where: { loanId: testLoan.id } });
+    const ledgerInDb = await LedgerEntry.count({ where: { loanId: testLoan.id } });
     expect(ledgerInDb).toBeGreaterThan(0);
   });
 
@@ -139,40 +133,38 @@ describe("Phase 12: System Hardening & Immutability", () => {
     expect(result.error).toContain("existing loan history");
 
     // Verify customer still exists in DB
-    const customerInDb = await prisma.customer.findUnique({ where: { id: testCustomer.id } });
+    const customerInDb = await Customer.findByPk(testCustomer.id);
     expect(customerInDb).not.toBeNull();
   });
 
   it("3. deleteCustomerAction allows deleting a draft customer with 0 loans", async () => {
-    const draftCustomer = await prisma.customer.create({
-      data: {
-        fullName: "Draft Customer No Loans",
-        phone: "9876541299",
-        addressLine1: "456 Empty St",
-        city: "Hyderabad",
-        state: "Telangana",
-        pincode: "500002",
-        createdById: adminUserId,
-      },
+    const draftCustomer = await Customer.create({
+      fullName: "Draft Customer No Loans",
+      phone: "9876541299",
+      addressLine1: "456 Empty St",
+      city: "Hyderabad",
+      state: "Telangana",
+      pincode: "500002",
+      createdById: adminUserId,
     });
 
     const result = await deleteCustomerAction(draftCustomer.id);
     expect(result.success).toBe(true);
 
-    const checkDb = await prisma.customer.findUnique({ where: { id: draftCustomer.id } });
+    const checkDb = await Customer.findByPk(draftCustomer.id);
     expect(checkDb).toBeNull();
   });
 
   it("4. Single-entry ledger architecture invariant: exactly one row created per event", async () => {
-    const countBefore = await prisma.ledgerEntry.count();
-    await writeLedgerEntry(prisma, {
+    const countBefore = await LedgerEntry.count();
+    await writeLedgerEntry(undefined, {
       loanId: testLoan.id,
       type: "CLOSURE",
-      amount: new Prisma.Decimal("0"),
-      principalAfter: new Prisma.Decimal("0"),
+      amount: new Decimal("0"),
+      principalAfter: new Decimal("0"),
       description: "Hardening test closure",
     });
-    const countAfter = await prisma.ledgerEntry.count();
+    const countAfter = await LedgerEntry.count();
     expect(countAfter).toBe(countBefore + 1);
   });
 
@@ -180,12 +172,12 @@ describe("Phase 12: System Hardening & Immutability", () => {
     const mockLoan = {
       id: "loan-123",
       loanNumber: "LN-2026-001",
-      principalAmount: new Prisma.Decimal("100000"),
-      principalOutstanding: new Prisma.Decimal("100000"),
-      interestRateMonthly: new Prisma.Decimal("1.5"),
-      totalAssessedValue: new Prisma.Decimal("150000"),
-      eligibleAmount: new Prisma.Decimal("112500"),
-      ltvPercent: new Prisma.Decimal("75.0"),
+      principalAmount: new Decimal("100000"),
+      principalOutstanding: new Decimal("100000"),
+      interestRateMonthly: new Decimal("1.5"),
+      totalAssessedValue: new Decimal("150000"),
+      eligibleAmount: new Decimal("112500"),
+      ltvPercent: new Decimal("75.0"),
       tenureMonths: 12,
       gracePeriodDays: 7,
       status: "ACTIVE",
@@ -197,9 +189,9 @@ describe("Phase 12: System Hardening & Immutability", () => {
           id: "item-1",
           itemType: "GOLD",
           purity: "K22",
-          grossWeightGrams: new Prisma.Decimal("25.500"),
-          netWeightGrams: new Prisma.Decimal("24.000"),
-          assessedValue: new Prisma.Decimal("150000"),
+          grossWeightGrams: new Decimal("25.500"),
+          netWeightGrams: new Decimal("24.000"),
+          assessedValue: new Decimal("150000"),
         },
       ],
       charges: [],

@@ -2,10 +2,9 @@
 
 import { revalidatePath } from "next/cache";
 import { checkAuth, checkAdmin } from "@/lib/auth/session";
-import { prisma } from "@/lib/db";
+import { User, Loan, Payment, Session, Account, Op } from "@/lib/db";
 import { auth } from "@/lib/auth";
 import { serializeForClient } from "@/lib/serialize";
-
 import { hashPassword } from "better-auth/crypto";
 import { isValidIndianMobile, normalizeIndianMobile } from "@/lib/auth/mobile-plugin";
 
@@ -15,33 +14,35 @@ export async function getStaffListAction() {
     throw new Error(adminAuth.error);
   }
 
-  const users = await prisma.user.findMany({
-    include: {
-      _count: {
-        select: {
-          loansHandled: true,
-          paymentsCollected: true,
-        },
-      },
-    },
-    orderBy: { createdAt: "desc" },
+  const rawUsers = await User.findAll({
+    order: [["createdAt", "DESC"]],
   });
 
-  const formattedUsers = users.map((u) => ({
-    id: u.id,
-    name: u.name,
-    email: u.email,
-    phone: u.phone,
-    role: u.role,
-    isActive: u.isActive,
-    hasHiddenPassword: !!u.hiddenPasswordHash, // Boolean indicator only — secrets never exposed
-    _count: {
-      loansHandled: u._count.loansHandled,
-      paymentsCollected: u._count.paymentsCollected,
-    },
-    createdAt: u.createdAt,
-    isSelf: u.id === adminAuth.user.id,
-  }));
+  const formattedUsers = await Promise.all(
+    rawUsers.map(async (rawU) => {
+      const u = rawU.toJSON() as any;
+      const [loansHandled, paymentsCollected] = await Promise.all([
+        Loan.count({ where: { handledById: u.id } }),
+        Payment.count({ where: { collectedById: u.id } }),
+      ]);
+
+      return {
+        id: u.id,
+        name: u.name,
+        email: u.email,
+        phone: u.phone,
+        role: u.role,
+        isActive: u.isActive,
+        hasHiddenPassword: !!u.hiddenPasswordHash,
+        _count: {
+          loansHandled,
+          paymentsCollected,
+        },
+        createdAt: u.createdAt,
+        isSelf: u.id === adminAuth.user.id,
+      };
+    })
+  );
 
   return serializeForClient(formattedUsers);
 }
@@ -71,12 +72,12 @@ export async function createStaffUserAction(formData: unknown) {
   const normalizedPhone = normalizeIndianMobile(data.phone);
 
   try {
-    const existingEmail = await prisma.user.findUnique({ where: { email: data.email } });
+    const existingEmail = await User.findOne({ where: { email: data.email } });
     if (existingEmail) {
       return { success: false, error: "A user with this email already exists" };
     }
 
-    const existingPhone = await prisma.user.findUnique({ where: { phone: normalizedPhone } });
+    const existingPhone = await User.findOne({ where: { phone: normalizedPhone } });
     if (existingPhone) {
       return { success: false, error: "A user with this mobile number already exists" };
     }
@@ -86,9 +87,6 @@ export async function createStaffUserAction(formData: unknown) {
       hiddenPasswordHash = await hashPassword(data.hiddenPassword.trim());
     }
 
-    // role/isActive are input:false on the user schema (see lib/auth.ts) so signUpEmail
-    // always creates a STAFF account regardless of body; promote/configure fields afterward
-    // via a direct write, gated on the adminAuth check above.
     await auth.api.signUpEmail({
       body: {
         email: data.email,
@@ -97,14 +95,14 @@ export async function createStaffUserAction(formData: unknown) {
       },
     });
 
-    await prisma.user.update({
-      where: { email: data.email },
-      data: {
+    await User.update(
+      {
         phone: normalizedPhone,
         hiddenPasswordHash,
         role: data.role,
       },
-    });
+      { where: { email: data.email } }
+    );
 
     revalidatePath("/admin/staff");
     return { success: true };
@@ -128,10 +126,10 @@ export async function updateStaffStatusAction(userId: string, isActive: boolean)
   }
 
   try {
-    await prisma.user.update({
-      where: { id: userId },
-      data: { isActive },
-    });
+    await User.update(
+      { isActive },
+      { where: { id: userId } }
+    );
 
     revalidatePath("/admin/staff");
     return { success: true };
@@ -161,8 +159,8 @@ export async function updateStaffUserAction(
   }
 
   try {
-    const existing = await prisma.user.findFirst({
-      where: { email: data.email, id: { not: userId } },
+    const existing = await User.findOne({
+      where: { email: data.email, id: { [Op.ne]: userId } },
     });
     if (existing) {
       return {
@@ -171,15 +169,15 @@ export async function updateStaffUserAction(
       };
     }
 
-    await prisma.user.update({
-      where: { id: userId },
-      data: {
+    await User.update(
+      {
         name: data.name,
         email: data.email,
         role: data.role,
         isActive: data.isActive,
       },
-    });
+      { where: { id: userId } }
+    );
 
     revalidatePath("/admin/staff");
     return { success: true };
@@ -203,7 +201,7 @@ export async function deleteStaffUserAction(userId: string) {
   }
 
   try {
-    const handledLoans = await prisma.loan.count({ where: { handledById: userId } });
+    const handledLoans = await Loan.count({ where: { handledById: userId } });
     if (handledLoans > 0) {
       return {
         success: false,
@@ -212,9 +210,9 @@ export async function deleteStaffUserAction(userId: string) {
       };
     }
 
-    await prisma.session.deleteMany({ where: { userId } });
-    await prisma.account.deleteMany({ where: { userId } });
-    await prisma.user.delete({ where: { id: userId } });
+    await Session.destroy({ where: { userId } });
+    await Account.destroy({ where: { userId } });
+    await User.destroy({ where: { id: userId } });
 
     revalidatePath("/admin/staff");
     return { success: true };

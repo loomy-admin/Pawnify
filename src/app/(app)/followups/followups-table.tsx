@@ -6,7 +6,7 @@ import { ColumnDef } from "@tanstack/react-table";
 import { DataTable } from "@/components/ui/data-table";
 import { FollowUpStatusButton, DeleteFollowUpButton } from "./followup-client";
 import { AlertTriangle, Phone } from "lucide-react";
-import type { FollowUpStatus } from "@prisma/client";
+import type { FollowUpStatus } from "@/lib/db/types";
 
 export interface FollowUpRowData {
   id: string;

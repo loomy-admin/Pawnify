@@ -106,7 +106,7 @@ export async function releaseItemsAction(loanId: string) {
   }
 }
 
-import { prisma } from "@/lib/db";
+import { Loan, LedgerEntry, Payment, LoanItem, LoanCharge, FollowUp } from "@/lib/db";
 
 export async function updateLoanNotesAction(loanId: string, notes: string) {
   const auth = await checkAuth();
@@ -115,10 +115,10 @@ export async function updateLoanNotesAction(loanId: string, notes: string) {
   }
 
   try {
-    await prisma.loan.update({
-      where: { id: loanId },
-      data: { notes: notes.trim() || null },
-    });
+    await Loan.update(
+      { notes: notes.trim() || null },
+      { where: { id: loanId } }
+    );
     revalidatePath(`/loans/${loanId}`);
     return { success: true };
   } catch (err: unknown) {
@@ -137,8 +137,8 @@ export async function deleteLoanAction(loanId: string) {
   }
 
   try {
-    const hasLedger = await prisma.ledgerEntry.count({ where: { loanId } });
-    const hasPayments = await prisma.payment.count({ where: { loanId } });
+    const hasLedger = await LedgerEntry.count({ where: { loanId } });
+    const hasPayments = await Payment.count({ where: { loanId } });
     if (hasLedger > 0 || hasPayments > 0) {
       return {
         success: false,
@@ -146,10 +146,10 @@ export async function deleteLoanAction(loanId: string) {
       };
     }
 
-    await prisma.loanItem.deleteMany({ where: { loanId } });
-    await prisma.loanCharge.deleteMany({ where: { loanId } });
-    await prisma.followUp.deleteMany({ where: { loanId } });
-    await prisma.loan.delete({ where: { id: loanId } });
+    await LoanItem.destroy({ where: { loanId } });
+    await LoanCharge.destroy({ where: { loanId } });
+    await FollowUp.destroy({ where: { loanId } });
+    await Loan.destroy({ where: { id: loanId } });
 
     revalidatePath("/loans");
     revalidatePath("/dashboard");
@@ -159,6 +159,48 @@ export async function deleteLoanAction(loanId: string) {
     return {
       success: false,
       error: err instanceof Error ? err.message : "Failed to delete loan",
+    };
+  }
+}
+
+export async function reversePaymentAction(paymentId: string, loanId: string, reason: string) {
+  const auth = await checkAdmin();
+  if (!auth.authenticated) {
+    return { success: false, error: auth.error };
+  }
+
+  try {
+    const { reversePayment } = await import("@/lib/services/payments");
+    await reversePayment(paymentId, auth.user.id, reason);
+    revalidatePath(`/loans/${loanId}`);
+    revalidatePath("/loans");
+    revalidatePath("/dashboard");
+    revalidatePath("/day-book");
+    return { success: true };
+  } catch (err: unknown) {
+    console.error("Reverse payment error:", err);
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : "Failed to reverse payment",
+    };
+  }
+}
+
+export async function getPreclosureQuoteAction(loanId: string, asOfDateStr?: string) {
+  const auth = await checkAuth();
+  if (!auth.authenticated) {
+    return { success: false, error: "Unauthorized" };
+  }
+
+  try {
+    const { getPreclosureQuote } = await import("@/lib/services/loans");
+    const asOfDate = asOfDateStr ? new Date(asOfDateStr) : new Date();
+    const quote = await getPreclosureQuote(loanId, asOfDate);
+    return { success: true, quote: serializeForClient(quote) };
+  } catch (err: unknown) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : "Failed to compute quote",
     };
   }
 }

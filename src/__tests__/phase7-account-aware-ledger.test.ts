@@ -23,8 +23,8 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { prisma } from "@/lib/db";
-import { Prisma } from "@prisma/client";
+import { Loan, LedgerEntry, AccountMaster, Op } from "@/lib/db";
+import Decimal from "decimal.js";
 import { writeLedgerEntry } from "@/lib/ledger-writer";
 import { createAccount, toggleAccountStatus } from "@/lib/services/accounts";
 import { computeAccruedInterest } from "@/lib/services/interest";
@@ -42,7 +42,7 @@ const createdAccountCodes: string[] = [];
 
 beforeAll(async () => {
   // Use the first available loan for all tests
-  const loan = await prisma.loan.findFirst({ select: { id: true } });
+  const loan = await Loan.findOne({ attributes: ["id"] });
   if (!loan) {
     throw new Error("No loans in DB — seed required");
   }
@@ -52,11 +52,11 @@ beforeAll(async () => {
 afterAll(async () => {
   // Clean up test ledger entries
   if (createdLedgerIds.length > 0) {
-    await prisma.ledgerEntry.deleteMany({ where: { id: { in: createdLedgerIds } } });
+    await LedgerEntry.destroy({ where: { id: { [Op.in]: createdLedgerIds } } });
   }
   // Clean up test accounts
   if (createdAccountCodes.length > 0) {
-    await prisma.accountMaster.deleteMany({ where: { code: { in: createdAccountCodes } } });
+    await AccountMaster.destroy({ where: { code: { [Op.in]: createdAccountCodes } } });
   }
 });
 
@@ -74,11 +74,11 @@ function trackAccount(code: string) {
 
 describe("1. writeLedgerEntry — backward compatible (no accountId)", () => {
   it("creates a single LedgerEntry with accountId = NULL when no account is provided", async () => {
-    const entry = await writeLedgerEntry(prisma, {
+    const entry = await writeLedgerEntry(undefined, {
       loanId: testLoanId,
       type: "DISBURSEMENT",
-      amount: new Prisma.Decimal("50000.00"),
-      principalAfter: new Prisma.Decimal("50000.00"),
+      amount: new Decimal("50000.00"),
+      principalAfter: new Decimal("50000.00"),
       description: "Phase 7 test — disbursement without account",
     });
 
@@ -92,18 +92,18 @@ describe("1. writeLedgerEntry — backward compatible (no accountId)", () => {
   });
 
   it("creates only ONE LedgerEntry per call (no double-entry pairs)", async () => {
-    const before = await prisma.ledgerEntry.count({ where: { loanId: testLoanId } });
+    const before = await LedgerEntry.count({ where: { loanId: testLoanId } });
 
-    const entry = await writeLedgerEntry(prisma, {
+    const entry = await writeLedgerEntry(undefined, {
       loanId: testLoanId,
       type: "PAYMENT",
-      amount: new Prisma.Decimal("1000.00"),
-      principalAfter: new Prisma.Decimal("49000.00"),
+      amount: new Decimal("1000.00"),
+      principalAfter: new Decimal("49000.00"),
       description: "Phase 7 test — single entry proof",
     });
 
     trackLedger(entry.id);
-    const after = await prisma.ledgerEntry.count({ where: { loanId: testLoanId } });
+    const after = await LedgerEntry.count({ where: { loanId: testLoanId } });
     expect(after - before).toBe(1); // exactly ONE row added
   });
 });
@@ -124,11 +124,11 @@ describe("2. LedgerEntry with active AccountMaster", () => {
   });
 
   it("creates a LedgerEntry linked to an active account", async () => {
-    const entry = await writeLedgerEntry(prisma, {
+    const entry = await writeLedgerEntry(undefined, {
       loanId: testLoanId,
       type: "DISBURSEMENT",
-      amount: new Prisma.Decimal("75000.00"),
-      principalAfter: new Prisma.Decimal("75000.00"),
+      amount: new Decimal("75000.00"),
+      principalAfter: new Decimal("75000.00"),
       description: "Phase 7 test — linked to active account",
       accountId: testAccountId,
     });
@@ -137,28 +137,25 @@ describe("2. LedgerEntry with active AccountMaster", () => {
     expect(entry.accountId).toBe(testAccountId);
 
     // Verify via DB read
-    const fromDb = await prisma.ledgerEntry.findUnique({
-      where: { id: entry.id },
-      include: { account: true },
-    });
-    expect(fromDb?.account?.code).toBe(testAccountCode);
-    expect(fromDb?.account?.isActive).toBe(true);
+    const fromDb = await LedgerEntry.findByPk(entry.id, { include: [{ model: AccountMaster, as: "account" }] });
+    expect((fromDb as any)?.account?.code).toBe(testAccountCode);
+    expect((fromDb as any)?.account?.isActive).toBe(true);
   });
 
   it("does NOT create a second (debit/credit) entry when accountId is provided", async () => {
-    const before = await prisma.ledgerEntry.count({ where: { loanId: testLoanId } });
+    const before = await LedgerEntry.count({ where: { loanId: testLoanId } });
 
-    const entry = await writeLedgerEntry(prisma, {
+    const entry = await writeLedgerEntry(undefined, {
       loanId: testLoanId,
       type: "DISBURSEMENT",
-      amount: new Prisma.Decimal("10000.00"),
-      principalAfter: new Prisma.Decimal("10000.00"),
+      amount: new Decimal("10000.00"),
+      principalAfter: new Decimal("10000.00"),
       description: "Phase 7 test — no pair proof",
       accountId: testAccountId,
     });
 
     trackLedger(entry.id);
-    const after = await prisma.ledgerEntry.count({ where: { loanId: testLoanId } });
+    const after = await LedgerEntry.count({ where: { loanId: testLoanId } });
     expect(after - before).toBe(1); // still exactly ONE row
   });
 });
@@ -177,11 +174,11 @@ describe("3. Inactive account validation", () => {
     await toggleAccountStatus(account.id, false);
 
     await expect(
-      writeLedgerEntry(prisma, {
+      writeLedgerEntry(undefined, {
         loanId: testLoanId,
         type: "PAYMENT",
-        amount: new Prisma.Decimal("5000.00"),
-        principalAfter: new Prisma.Decimal("45000.00"),
+        amount: new Decimal("5000.00"),
+        principalAfter: new Decimal("45000.00"),
         description: "Should fail — inactive account",
         accountId: account.id,
       })
@@ -198,14 +195,14 @@ describe("3. Inactive account validation", () => {
     });
     await toggleAccountStatus(account.id, false);
 
-    const before = await prisma.ledgerEntry.count({ where: { loanId: testLoanId } });
+    const before = await LedgerEntry.count({ where: { loanId: testLoanId } });
 
     try {
-      await writeLedgerEntry(prisma, {
+      await writeLedgerEntry(undefined, {
         loanId: testLoanId,
         type: "PAYMENT",
-        amount: new Prisma.Decimal("5000.00"),
-        principalAfter: new Prisma.Decimal("44000.00"),
+        amount: new Decimal("5000.00"),
+        principalAfter: new Decimal("44000.00"),
         description: "Should fail",
         accountId: account.id,
       });
@@ -213,7 +210,7 @@ describe("3. Inactive account validation", () => {
       // expected
     }
 
-    const after = await prisma.ledgerEntry.count({ where: { loanId: testLoanId } });
+    const after = await LedgerEntry.count({ where: { loanId: testLoanId } });
     expect(after).toBe(before); // no row written on rejection
   });
 });
@@ -223,11 +220,11 @@ describe("3. Inactive account validation", () => {
 describe("4. Invalid account ID rejected", () => {
   it("throws when accountId references a non-existent account", async () => {
     await expect(
-      writeLedgerEntry(prisma, {
+      writeLedgerEntry(undefined, {
         loanId: testLoanId,
         type: "PAYMENT",
-        amount: new Prisma.Decimal("1000.00"),
-        principalAfter: new Prisma.Decimal("49000.00"),
+        amount: new Decimal("1000.00"),
+        principalAfter: new Decimal("49000.00"),
         description: "Should fail — non-existent account",
         accountId: "non-existent-account-id-00000000",
       })
@@ -239,11 +236,7 @@ describe("4. Invalid account ID rejected", () => {
 
 describe("5. Historical LedgerEntry integrity", () => {
   it("all existing historical rows with accountId=NULL remain accessible", async () => {
-    const nullEntries = await prisma.ledgerEntry.findMany({
-      where: { accountId: null },
-      select: { id: true, type: true, amount: true },
-      take: 10,
-    });
+    const nullEntries = await LedgerEntry.findAll({ where: { accountId: null }, attributes: ["id", "type", "amount"], limit: 10 });
 
     // Must have historical entries — audit confirmed 29 in DB
     expect(nullEntries.length).toBeGreaterThan(0);
@@ -254,25 +247,21 @@ describe("5. Historical LedgerEntry integrity", () => {
   });
 
   it("does NOT modify existing historical entries during writeLedgerEntry", async () => {
-    const historicalBefore = await prisma.ledgerEntry.findMany({
-      where: { accountId: null, loanId: testLoanId },
-      orderBy: { createdAt: "asc" },
-      select: { id: true, amount: true, type: true, accountId: true },
-    });
+    const historicalBefore = await LedgerEntry.findAll({ where: { accountId: null, loanId: testLoanId }, order: [["createdAt", "ASC"]], attributes: ["id", "amount", "type", "accountId"] });
 
     // Writing a new entry should not touch existing ones
-    const newEntry = await writeLedgerEntry(prisma, {
+    const newEntry = await writeLedgerEntry(undefined, {
       loanId: testLoanId,
       type: "CLOSURE",
-      amount: new Prisma.Decimal("0.00"),
-      principalAfter: new Prisma.Decimal("0.00"),
+      amount: new Decimal("0.00"),
+      principalAfter: new Decimal("0.00"),
       description: "Phase 7 test — closure without account",
     });
     trackLedger(newEntry.id);
 
     // All previously null entries remain unchanged
     for (const h of historicalBefore) {
-      const current = await prisma.ledgerEntry.findUnique({ where: { id: h.id } });
+      const current = await LedgerEntry.findByPk(h.id );
       expect(current?.accountId).toBeNull();
       expect(current?.amount.toString()).toBe(h.amount.toString());
       expect(current?.type).toBe(h.type);
@@ -293,11 +282,11 @@ describe("6. Account deactivation safety", () => {
     });
 
     // Create entry linked to the active account
-    const entry = await writeLedgerEntry(prisma, {
+    const entry = await writeLedgerEntry(undefined, {
       loanId: testLoanId,
       type: "PAYMENT",
-      amount: new Prisma.Decimal("2000.00"),
-      principalAfter: new Prisma.Decimal("48000.00"),
+      amount: new Decimal("2000.00"),
+      principalAfter: new Decimal("48000.00"),
       description: "Phase 7 test — deactivation safety",
       accountId: account.id,
     });
@@ -307,7 +296,7 @@ describe("6. Account deactivation safety", () => {
     await toggleAccountStatus(account.id, false);
 
     // Historical entry still references the now-deactivated account
-    const fromDb = await prisma.ledgerEntry.findUnique({ where: { id: entry.id } });
+    const fromDb = await LedgerEntry.findByPk(entry.id );
     expect(fromDb?.accountId).toBe(account.id); // reference is preserved
   });
 });
@@ -316,55 +305,55 @@ describe("6. Account deactivation safety", () => {
 
 describe("7-10. Existing business event types remain unchanged", () => {
   it("DISBURSEMENT: amount = principalAmount disbursed", async () => {
-    const entry = await writeLedgerEntry(prisma, {
+    const entry = await writeLedgerEntry(undefined, {
       loanId: testLoanId,
       type: "DISBURSEMENT",
-      amount: new Prisma.Decimal("100000.00"),
-      principalAfter: new Prisma.Decimal("100000.00"),
+      amount: new Decimal("100000.00"),
+      principalAfter: new Decimal("100000.00"),
       description: "Test DISBURSEMENT semantics",
     });
     trackLedger(entry.id);
     expect(entry.type).toBe("DISBURSEMENT");
-    expect(new Prisma.Decimal(entry.amount).eq(new Prisma.Decimal("100000.00"))).toBe(true);
+    expect(new Decimal(entry.amount).eq(new Decimal("100000.00"))).toBe(true);
   });
 
   it("PAYMENT: amount = cash received, principalAfter = remaining principal", async () => {
-    const entry = await writeLedgerEntry(prisma, {
+    const entry = await writeLedgerEntry(undefined, {
       loanId: testLoanId,
       type: "PAYMENT",
-      amount: new Prisma.Decimal("5000.00"),
-      principalAfter: new Prisma.Decimal("95000.00"),
+      amount: new Decimal("5000.00"),
+      principalAfter: new Decimal("95000.00"),
       description: "Test PAYMENT semantics",
     });
     trackLedger(entry.id);
     expect(entry.type).toBe("PAYMENT");
-    expect(new Prisma.Decimal(entry.principalAfter).toString()).toBe("95000");
+    expect(new Decimal(entry.principalAfter).toString()).toBe("95000");
   });
 
   it("CLOSURE: amount = 0, principalAfter = 0 (loan fully settled)", async () => {
-    const entry = await writeLedgerEntry(prisma, {
+    const entry = await writeLedgerEntry(undefined, {
       loanId: testLoanId,
       type: "CLOSURE",
-      amount: new Prisma.Decimal("0.00"),
-      principalAfter: new Prisma.Decimal("0.00"),
+      amount: new Decimal("0.00"),
+      principalAfter: new Decimal("0.00"),
       description: "Test CLOSURE semantics",
     });
     trackLedger(entry.id);
     expect(entry.type).toBe("CLOSURE");
-    expect(new Prisma.Decimal(entry.amount).isZero()).toBe(true);
+    expect(new Decimal(entry.amount).isZero()).toBe(true);
   });
 
   it("ITEM_RELEASE: amount = 0, principalAfter = 0 (physical collateral return)", async () => {
-    const entry = await writeLedgerEntry(prisma, {
+    const entry = await writeLedgerEntry(undefined, {
       loanId: testLoanId,
       type: "ITEM_RELEASE",
-      amount: new Prisma.Decimal("0.00"),
-      principalAfter: new Prisma.Decimal("0.00"),
+      amount: new Decimal("0.00"),
+      principalAfter: new Decimal("0.00"),
       description: "Test ITEM_RELEASE semantics",
     });
     trackLedger(entry.id);
     expect(entry.type).toBe("ITEM_RELEASE");
-    expect(new Prisma.Decimal(entry.amount).isZero()).toBe(true);
+    expect(new Decimal(entry.amount).isZero()).toBe(true);
   });
 });
 
@@ -372,9 +361,9 @@ describe("7-10. Existing business event types remain unchanged", () => {
 
 describe("11-12. 50% mode isolation", () => {
   it("stored LedgerEntry amount is always the true 100% value regardless of calculationMode", async () => {
-    const truePrincipal = new Prisma.Decimal("200000.00");
+    const truePrincipal = new Decimal("200000.00");
 
-    const entry = await writeLedgerEntry(prisma, {
+    const entry = await writeLedgerEntry(undefined, {
       loanId: testLoanId,
       type: "DISBURSEMENT",
       amount: truePrincipal,
@@ -384,39 +373,39 @@ describe("11-12. 50% mode isolation", () => {
     trackLedger(entry.id);
 
     // Read from DB — must be 100% regardless of projection mode
-    const fromDb = await prisma.ledgerEntry.findUnique({ where: { id: entry.id } });
+    const fromDb = await LedgerEntry.findByPk(entry.id );
     expect(fromDb?.amount.toString()).toBe("200000");
     expect(fromDb?.principalAfter.toString()).toBe("200000");
 
     // Projection only happens at the presentation layer — projectLedgerEntry
     const projected50 = projectLedgerEntry(
-      { amount: fromDb!.amount, principalAfter: fromDb!.principalAfter },
+      { amount: new Decimal(fromDb!.amount), principalAfter: new Decimal(fromDb!.principalAfter) },
       "FIFTY_PERCENT"
     );
     expect(projected50.amount.toString()).toBe("100000"); // projected view only
     // DB row is unchanged (the projection is purely in-memory)
-    const fromDbAgain = await prisma.ledgerEntry.findUnique({ where: { id: entry.id } });
+    const fromDbAgain = await LedgerEntry.findByPk(entry.id );
     expect(fromDbAgain?.amount.toString()).toBe("200000"); // still 100% in DB
   });
 
   it("account association is completely unaffected by calculationMode", async () => {
-    const entry = await writeLedgerEntry(prisma, {
+    const entry = await writeLedgerEntry(undefined, {
       loanId: testLoanId,
       type: "PAYMENT",
-      amount: new Prisma.Decimal("5000.00"),
-      principalAfter: new Prisma.Decimal("195000.00"),
+      amount: new Decimal("5000.00"),
+      principalAfter: new Decimal("195000.00"),
       description: "Phase 7 — account association mode test",
       accountId: testAccountId, // active account
     });
     trackLedger(entry.id);
 
     // accountId is metadata — no projection ever touches it
-    const fromDb = await prisma.ledgerEntry.findUnique({ where: { id: entry.id } });
+    const fromDb = await LedgerEntry.findByPk(entry.id );
     expect(fromDb?.accountId).toBe(testAccountId);
 
     // Even if projected, accountId is not a monetary field and stays
     const projected = projectLedgerEntry(
-      { amount: fromDb!.amount, principalAfter: fromDb!.principalAfter, accountId: fromDb!.accountId },
+      { amount: new Decimal(fromDb!.amount), principalAfter: new Decimal(fromDb!.principalAfter), accountId: fromDb!.accountId },
       "FIFTY_PERCENT"
     );
     expect((projected as { accountId?: string | null }).accountId).toBe(testAccountId);
@@ -427,8 +416,8 @@ describe("11-12. 50% mode isolation", () => {
 
 describe("13. Existing interest calculation unchanged", () => {
   it("Actual/365 interest formula is exactly preserved", () => {
-    const principal = new Prisma.Decimal("100000");
-    const monthlyRate = new Prisma.Decimal("2.000");
+    const principal = new Decimal("100000");
+    const monthlyRate = new Decimal("2.000");
     const lastSettledDate = new Date("2026-01-01T00:00:00Z");
     const asOfDate = new Date("2026-01-31T00:00:00Z"); // 30 days
 
@@ -445,10 +434,10 @@ describe("13. Existing interest calculation unchanged", () => {
 
 describe("14. Existing payment waterfall unchanged", () => {
   it("previewPaymentAllocation returns consistent waterfall allocation", async () => {
-    const activeLoans = await prisma.loan.findMany({
+    const activeLoans = await Loan.findAll({
       where: { status: "ACTIVE" },
-      select: { id: true, principalOutstanding: true },
-      take: 1,
+      attributes: ["id", "principalOutstanding"],
+      limit: 1,
     });
 
     if (activeLoans.length === 0) {
@@ -472,7 +461,7 @@ describe("14. Existing payment waterfall unchanged", () => {
     const totalAllocated = allocation.allocatedCharges
       .plus(allocation.allocatedInterest)
       .plus(allocation.allocatedPrincipal);
-    expect(totalAllocated.lte(new Prisma.Decimal(smallAmount))).toBe(true);
+    expect(totalAllocated.lte(new Decimal(smallAmount))).toBe(true);
   });
 });
 
@@ -480,27 +469,27 @@ describe("14. Existing payment waterfall unchanged", () => {
 
 describe("15. Database safety — no phantom rows", () => {
   it("LedgerEntry count grows exactly by number of test entries created", async () => {
-    const before = await prisma.ledgerEntry.count();
+    const before = await LedgerEntry.count();
 
-    const e1 = await writeLedgerEntry(prisma, {
+    const e1 = await writeLedgerEntry(undefined, {
       loanId: testLoanId,
       type: "DISBURSEMENT",
-      amount: new Prisma.Decimal("1.00"),
-      principalAfter: new Prisma.Decimal("1.00"),
+      amount: new Decimal("1.00"),
+      principalAfter: new Decimal("1.00"),
       description: "Count test 1",
     });
-    const e2 = await writeLedgerEntry(prisma, {
+    const e2 = await writeLedgerEntry(undefined, {
       loanId: testLoanId,
       type: "PAYMENT",
-      amount: new Prisma.Decimal("1.00"),
-      principalAfter: new Prisma.Decimal("0.00"),
+      amount: new Decimal("1.00"),
+      principalAfter: new Decimal("0.00"),
       description: "Count test 2",
     });
 
     trackLedger(e1.id);
     trackLedger(e2.id);
 
-    const after = await prisma.ledgerEntry.count();
+    const after = await LedgerEntry.count();
     expect(after - before).toBe(2); // exactly 2 new rows
   });
 });
@@ -509,31 +498,31 @@ describe("15. Database safety — no phantom rows", () => {
 
 describe("16. referenceId optional field", () => {
   it("stores referenceId when provided (used for PAYMENT → Payment table linkage)", async () => {
-    const entry = await writeLedgerEntry(prisma, {
+    const entry = await writeLedgerEntry(undefined, {
       loanId: testLoanId,
       type: "PAYMENT",
-      amount: new Prisma.Decimal("500.00"),
-      principalAfter: new Prisma.Decimal("49500.00"),
+      amount: new Decimal("500.00"),
+      principalAfter: new Decimal("49500.00"),
       description: "Test referenceId",
       referenceId: "test-payment-ref-123",
     });
 
     trackLedger(entry.id);
-    const fromDb = await prisma.ledgerEntry.findUnique({ where: { id: entry.id } });
+    const fromDb = await LedgerEntry.findByPk(entry.id );
     expect(fromDb?.referenceId).toBe("test-payment-ref-123");
   });
 
   it("referenceId is null when not provided", async () => {
-    const entry = await writeLedgerEntry(prisma, {
+    const entry = await writeLedgerEntry(undefined, {
       loanId: testLoanId,
       type: "CLOSURE",
-      amount: new Prisma.Decimal("0.00"),
-      principalAfter: new Prisma.Decimal("0.00"),
+      amount: new Decimal("0.00"),
+      principalAfter: new Decimal("0.00"),
       description: "Test no referenceId",
     });
 
     trackLedger(entry.id);
-    const fromDb = await prisma.ledgerEntry.findUnique({ where: { id: entry.id } });
+    const fromDb = await LedgerEntry.findByPk(entry.id );
     expect(fromDb?.referenceId).toBeNull();
   });
 });

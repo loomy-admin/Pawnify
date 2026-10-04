@@ -5,17 +5,9 @@
  * - Day Book
  * - Account Ledger
  * - Accounting reports & summaries
- *
- * Rules:
- * - Code is uppercase and unique
- * - Name is unique (case-insensitive) to prevent operator confusion
- * - Inactive accounts cannot be used for new transactions
- * - No monetary calculations or balances are stored in Account Master
- * - Pure master/metadata layer
  */
 
-import { prisma } from "@/lib/db";
-import { Prisma, AccountType } from "@prisma/client";
+import { AccountMaster, User, Op, AccountType } from "@/lib/db";
 import {
   CreateAccountInput,
   CreateAccountSchema,
@@ -41,11 +33,22 @@ export interface AccountMasterWithCreator {
   updatedAt: Date;
 }
 
+function formatAccount(acc: AccountMaster): AccountMasterWithCreator {
+  const json = acc.toJSON() as any;
+  return {
+    ...json,
+    createdBy: json.createdBy
+      ? {
+          id: json.createdBy.id,
+          name: json.createdBy.name,
+          email: json.createdBy.email,
+        }
+      : null,
+  };
+}
+
 /**
  * Create a new account in Account Master.
- *
- * @param input Validated creation data
- * @param createdById User ID of the admin creating this account
  */
 export async function createAccount(
   input: CreateAccountInput,
@@ -53,13 +56,10 @@ export async function createAccount(
 ): Promise<AccountMasterWithCreator> {
   const parsed = CreateAccountSchema.parse(input);
 
-  // 1. Check duplicate code (case-insensitive)
-  const existingCode = await prisma.accountMaster.findFirst({
+  // 1. Check duplicate code
+  const existingCode = await AccountMaster.findOne({
     where: {
-      code: {
-        equals: parsed.code,
-        mode: "insensitive",
-      },
+      code: parsed.code,
     },
   });
 
@@ -67,13 +67,10 @@ export async function createAccount(
     throw new Error(`Account code "${parsed.code}" already exists.`);
   }
 
-  // 2. Check duplicate name (case-insensitive)
-  const existingName = await prisma.accountMaster.findFirst({
+  // 2. Check duplicate name
+  const existingName = await AccountMaster.findOne({
     where: {
-      name: {
-        equals: parsed.name,
-        mode: "insensitive",
-      },
+      name: parsed.name,
     },
   });
 
@@ -82,21 +79,20 @@ export async function createAccount(
   }
 
   // 3. Create account
-  return await prisma.accountMaster.create({
-    data: {
-      code: parsed.code,
-      name: parsed.name,
-      type: parsed.type,
-      description: parsed.description,
-      isActive: parsed.isActive,
-      createdById: createdById ?? null,
-    },
-    include: {
-      createdBy: {
-        select: { id: true, name: true, email: true },
-      },
-    },
+  const created = await AccountMaster.create({
+    code: parsed.code,
+    name: parsed.name,
+    type: parsed.type as any,
+    description: parsed.description || null,
+    isActive: parsed.isActive ?? true,
+    createdById: createdById ?? null,
   });
+
+  const full = await AccountMaster.findByPk(created.id, {
+    include: [{ model: User, as: "createdBy", attributes: ["id", "name", "email"] }],
+  });
+
+  return formatAccount(full || created);
 }
 
 /**
@@ -109,9 +105,7 @@ export async function updateAccount(
 ): Promise<AccountMasterWithCreator> {
   const parsed = UpdateAccountSchema.parse(input);
 
-  const existing = await prisma.accountMaster.findUnique({
-    where: { id },
-  });
+  const existing = await AccountMaster.findByPk(id);
 
   if (!existing) {
     throw new Error("Account not found.");
@@ -119,13 +113,10 @@ export async function updateAccount(
 
   // If name is updated, check uniqueness against other accounts
   if (parsed.name && parsed.name.toLowerCase() !== existing.name.toLowerCase()) {
-    const duplicateName = await prisma.accountMaster.findFirst({
+    const duplicateName = await AccountMaster.findOne({
       where: {
-        name: {
-          equals: parsed.name,
-          mode: "insensitive",
-        },
-        id: { not: id },
+        name: parsed.name,
+        id: { [Op.ne]: id },
       },
     });
 
@@ -134,20 +125,18 @@ export async function updateAccount(
     }
   }
 
-  return await prisma.accountMaster.update({
-    where: { id },
-    data: {
-      ...(parsed.name !== undefined && { name: parsed.name }),
-      ...(parsed.type !== undefined && { type: parsed.type }),
-      ...(parsed.description !== undefined && { description: parsed.description }),
-      ...(parsed.isActive !== undefined && { isActive: parsed.isActive }),
-    },
-    include: {
-      createdBy: {
-        select: { id: true, name: true, email: true },
-      },
-    },
+  await existing.update({
+    ...(parsed.name !== undefined && { name: parsed.name }),
+    ...(parsed.type !== undefined && { type: parsed.type as any }),
+    ...(parsed.description !== undefined && { description: parsed.description }),
+    ...(parsed.isActive !== undefined && { isActive: parsed.isActive }),
   });
+
+  const full = await AccountMaster.findByPk(id, {
+    include: [{ model: User, as: "createdBy", attributes: ["id", "name", "email"] }],
+  });
+
+  return formatAccount(full || existing);
 }
 
 /**
@@ -157,23 +146,19 @@ export async function toggleAccountStatus(
   id: string,
   isActive: boolean
 ): Promise<AccountMasterWithCreator> {
-  const existing = await prisma.accountMaster.findUnique({
-    where: { id },
-  });
+  const existing = await AccountMaster.findByPk(id);
 
   if (!existing) {
     throw new Error("Account not found.");
   }
 
-  return await prisma.accountMaster.update({
-    where: { id },
-    data: { isActive },
-    include: {
-      createdBy: {
-        select: { id: true, name: true, email: true },
-      },
-    },
+  await existing.update({ isActive });
+
+  const full = await AccountMaster.findByPk(id, {
+    include: [{ model: User, as: "createdBy", attributes: ["id", "name", "email"] }],
   });
+
+  return formatAccount(full || existing);
 }
 
 /**
@@ -182,14 +167,10 @@ export async function toggleAccountStatus(
 export async function getAccountById(
   id: string
 ): Promise<AccountMasterWithCreator | null> {
-  return await prisma.accountMaster.findUnique({
-    where: { id },
-    include: {
-      createdBy: {
-        select: { id: true, name: true, email: true },
-      },
-    },
+  const item = await AccountMaster.findByPk(id, {
+    include: [{ model: User, as: "createdBy", attributes: ["id", "name", "email"] }],
   });
+  return item ? formatAccount(item) : null;
 }
 
 /**
@@ -198,19 +179,13 @@ export async function getAccountById(
 export async function getAccountByCode(
   code: string
 ): Promise<AccountMasterWithCreator | null> {
-  return await prisma.accountMaster.findFirst({
+  const item = await AccountMaster.findOne({
     where: {
-      code: {
-        equals: code.trim(),
-        mode: "insensitive",
-      },
+      code: code.trim(),
     },
-    include: {
-      createdBy: {
-        select: { id: true, name: true, email: true },
-      },
-    },
+    include: [{ model: User, as: "createdBy", attributes: ["id", "name", "email"] }],
   });
+  return item ? formatAccount(item) : null;
 }
 
 /**
@@ -219,7 +194,7 @@ export async function getAccountByCode(
 export async function listAccounts(
   filter?: AccountFilter
 ): Promise<AccountMasterWithCreator[]> {
-  const where: Prisma.AccountMasterWhereInput = {};
+  const where: any = {};
 
   if (filter?.type) {
     where.type = filter.type;
@@ -230,25 +205,27 @@ export async function listAccounts(
   }
 
   if (filter?.search) {
-    const term = filter.search.trim();
-    if (term) {
-      where.OR = [
-        { code: { contains: term, mode: "insensitive" } },
-        { name: { contains: term, mode: "insensitive" } },
-        { description: { contains: term, mode: "insensitive" } },
-      ];
-    }
+    const term = `%${filter.search.trim()}%`;
+    where[Op.or] = [
+      { code: { [Op.like]: term } },
+      { name: { [Op.like]: term } },
+      { description: { [Op.like]: term } },
+    ];
   }
 
-  return await prisma.accountMaster.findMany({
+  const items = await AccountMaster.findAll({
     where,
-    orderBy: [{ type: "asc" }, { code: "asc" }],
-    include: {
-      createdBy: {
-        select: { id: true, name: true, email: true },
+    order: [["type", "ASC"], ["code", "ASC"]],
+    include: [
+      {
+        model: User,
+        as: "createdBy",
+        attributes: ["id", "name", "email"],
       },
-    },
+    ],
   });
+
+  return items.map(formatAccount);
 }
 
 /**
@@ -257,24 +234,27 @@ export async function listAccounts(
 export async function getActiveAccounts(
   type?: AccountType
 ): Promise<Array<{ id: string; code: string; name: string; type: AccountType }>> {
-  return await prisma.accountMaster.findMany({
-    where: {
-      isActive: true,
-      ...(type && { type }),
-    },
-    select: {
-      id: true,
-      code: true,
-      name: true,
-      type: true,
-    },
-    orderBy: { code: "asc" },
+  const where: any = { isActive: true };
+  if (type) {
+    where.type = type;
+  }
+
+  const items = await AccountMaster.findAll({
+    where,
+    attributes: ["id", "code", "name", "type"],
+    order: [["code", "ASC"]],
   });
+
+  return items.map((i) => ({
+    id: i.id,
+    code: i.code,
+    name: i.name,
+    type: i.type as AccountType,
+  }));
 }
 
 /**
  * Validation guard: Ensures an account exists and is ACTIVE before posting.
- * Throws an explicit error if the account is inactive.
  */
 export async function validateAccountForPosting(accountId: string): Promise<AccountMasterWithCreator> {
   const account = await getAccountById(accountId);

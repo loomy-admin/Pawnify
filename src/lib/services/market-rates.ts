@@ -6,7 +6,7 @@
  * Fallbacks ensure 100% system uptime even if external APIs timeout or fail.
  */
 
-import { prisma } from "@/lib/db";
+import { AppSetting, Op } from "@/lib/db";
 import { updateSetting } from "@/lib/services/settings";
 
 export interface MarketRates {
@@ -46,10 +46,10 @@ const DEFAULT_RATES: MarketRates = {
  */
 export async function getMarketRates(): Promise<MarketRates> {
   try {
-    const settings = await prisma.appSetting.findMany({
+    const settings = await AppSetting.findAll({
       where: {
         key: {
-          in: [
+          [Op.in]: [
             "rate.gold.per_gram",
             "rate.silver.per_gram",
             "rate.last_updated",

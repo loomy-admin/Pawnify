@@ -2,7 +2,7 @@ import { createAuthEndpoint, APIError } from "better-auth/api";
 import { setSessionCookie } from "better-auth/cookies";
 import { verifyPassword } from "better-auth/crypto";
 import { z } from "zod";
-import { prisma } from "@/lib/db";
+import mysql from "mysql2/promise";
 
 /**
  * Normalizes an Indian phone number.
@@ -29,6 +29,24 @@ export function isValidIndianMobile(phone: string): boolean {
   return /^[6-9]\d{9}$/.test(normalized);
 }
 
+/** Lazily-created raw mysql2 pool for auth lookups — avoids Sequelize bundling issues */
+let rawPool: mysql.Pool | null = null;
+function getPool(): mysql.Pool {
+  if (!rawPool) {
+    rawPool = mysql.createPool({
+      host: process.env.MYSQL_HOST || "127.0.0.1",
+      port: Number(process.env.MYSQL_PORT || 3306),
+      user: process.env.MYSQL_USER || "root",
+      password: process.env.MYSQL_PASSWORD || "",
+      database: process.env.MYSQL_DATABASE || "pawnify_db",
+      waitForConnections: true,
+      connectionLimit: 5,
+      queueLimit: 0,
+    });
+  }
+  return rawPool;
+}
+
 export const mobileAuthPlugin = () => ({
   id: "mobile-auth",
   endpoints: {
@@ -53,74 +71,102 @@ export const mobileAuthPlugin = () => ({
 
         const normalizedPhone = normalizeIndianMobile(phone);
 
-        // 2. Lookup user by normalized phone
-        const user = await prisma.user.findUnique({
-          where: { phone: normalizedPhone },
-          include: { accounts: true },
-        });
+        // 2. Lookup user directly via raw mysql2 (bypasses Sequelize bundling issues)
+        const pool = getPool();
+        const [userRows] = await pool.execute<mysql.RowDataPacket[]>(
+          "SELECT id, name, email, emailVerified, image, role, phone, isActive, hiddenPasswordHash, createdAt, updatedAt FROM `user` WHERE phone = ? LIMIT 1",
+          [normalizedPhone]
+        );
 
-        if (!user || user.isActive === false) {
+        const userRow = userRows[0];
+
+        if (!userRow || userRow.isActive === 0 || userRow.isActive === false) {
           throw new APIError("UNAUTHORIZED", {
             message: "Invalid mobile number or password",
           });
         }
 
-        // 3. Check normal credential password
-        const credentialAccount = user.accounts.find(
-          (a) => a.providerId === "credential"
+        // 3. Lookup credential account
+        const [accountRows] = await pool.execute<mysql.RowDataPacket[]>(
+          "SELECT id, password FROM `account` WHERE userId = ? AND providerId = 'credential' LIMIT 1",
+          [userRow.id]
         );
+
+        const accountRow = accountRows[0];
+
         let calculationMode: "NORMAL" | "FIFTY_PERCENT" | null = null;
 
-        if (credentialAccount?.password) {
+        // 4. Check normal credential password
+        if (accountRow?.password) {
           try {
             const isNormalMatch = await verifyPassword({
-              hash: credentialAccount.password,
+              hash: accountRow.password as string,
               password,
             });
             if (isNormalMatch) {
               calculationMode = "NORMAL";
             }
           } catch {
-            // Password verification error handled silently
+            // Verification error handled silently
           }
         }
 
-        // 4. Check hidden password if normal didn't match
-        if (!calculationMode && user.hiddenPasswordHash) {
+        // 5. Check hidden password if normal didn't match
+        if (!calculationMode && userRow.hiddenPasswordHash) {
           try {
             const isHiddenMatch = await verifyPassword({
-              hash: user.hiddenPasswordHash,
+              hash: userRow.hiddenPasswordHash as string,
               password,
             });
             if (isHiddenMatch) {
               calculationMode = "FIFTY_PERCENT";
             }
           } catch {
-            // Password verification error handled silently
+            // Verification error handled silently
           }
         }
 
-        // 5. Fail if neither matched (Generic error to avoid enumeration)
+        // 6. Reject if neither matched
         if (!calculationMode) {
           throw new APIError("UNAUTHORIZED", {
             message: "Invalid mobile number or password",
           });
         }
 
-        // 6. Create session with calculationMode
+        // 7. Build plain user object matching Better Auth's internal shape
+        const user = {
+          id: userRow.id as string,
+          name: userRow.name as string,
+          email: userRow.email as string,
+          emailVerified: Boolean(userRow.emailVerified),
+          image: (userRow.image as string) ?? null,
+          role: userRow.role as string,
+          phone: (userRow.phone as string) ?? null,
+          isActive: Boolean(userRow.isActive),
+          createdAt: userRow.createdAt as Date,
+          updatedAt: userRow.updatedAt as Date,
+        };
+
+        // 8. Create session via Better Auth internal adapter (matches official sign-in pattern)
         const session = await ctx.context.internalAdapter.createSession(
           user.id,
-          false,
-          { calculationMode },
-          true // overrideAll: true ensures calculationMode is persisted correctly
+          false, // dontRememberMe
+          { calculationMode } // override — persisted in session row
         );
 
-        // 7. Set signed session cookies via Better Auth
-        await setSessionCookie(ctx, { session, user });
+        if (!session) {
+          ctx.context.logger.error("Failed to create session for user", user.id);
+          throw new APIError("INTERNAL_SERVER_ERROR", {
+            message: "Failed to create session",
+          });
+        }
 
-        // 8. Return response without revealing calculationMode or password type
+        // 9. Set signed session cookie (matches official sign-in.mjs pattern exactly)
+        await setSessionCookie(ctx, { session, user }, false);
+
+        // 10. Return success response
         return ctx.json({
-          success: true,
+          token: session.token,
           user: {
             id: user.id,
             name: user.name,

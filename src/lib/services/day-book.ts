@@ -3,21 +3,10 @@
  *
  * Dedicated server-side service for querying, summarizing, and presenting the daily
  * chronological journal of business events from the single-entry LedgerEntry system.
- *
- * LOCKED RULES:
- * 1. Single-entry preserved (no debit/credit pairs).
- * 2. Stored DB entries are always 100% true monetary values.
- * 3. Flow classification:
- *    PAYMENT      -> INFLOW
- *    DISBURSEMENT -> OUTFLOW
- *    CLOSURE      -> NEUTRAL
- *    ITEM_RELEASE -> NEUTRAL
- * 4. 50% calculation mode is presentation-only (halves monetary display fields, preserves metadata).
- * 5. Historical entries with accountId = NULL are safely handled as Unassigned/Legacy.
  */
 
-import { prisma } from "@/lib/db";
-import { Prisma, TransactionType } from "@prisma/client";
+import Decimal from "decimal.js";
+import { LedgerEntry, Loan, Customer, AccountMaster, Op, TransactionType } from "@/lib/db";
 import { CalculationMode } from "@/lib/auth/session";
 import { projectMonetaryDecimal } from "@/lib/projection";
 
@@ -39,8 +28,8 @@ export interface DayBookEntryItem {
   createdAt: Date;
   type: TransactionType;
   flow: CashFlowDirection;
-  amount: Prisma.Decimal;
-  principalAfter: Prisma.Decimal;
+  amount: Decimal;
+  principalAfter: Decimal;
   loanId: string;
   loanNumber: string;
   customerId: string;
@@ -55,9 +44,9 @@ export interface DayBookEntryItem {
 }
 
 export interface DayBookSummary {
-  totalInflow: Prisma.Decimal;
-  totalOutflow: Prisma.Decimal;
-  netCashFlow: Prisma.Decimal;
+  totalInflow: Decimal;
+  totalOutflow: Decimal;
+  netCashFlow: Decimal;
   eventCount: number;
   paymentCount: number;
   disbursementCount: number;
@@ -78,8 +67,10 @@ export interface DayBookResult {
 export function classifyFlow(type: TransactionType): CashFlowDirection {
   switch (type) {
     case "PAYMENT":
+    case "CAPITAL_INTRO":
       return "INFLOW";
     case "DISBURSEMENT":
+    case "REVERSAL":
       return "OUTFLOW";
     case "CLOSURE":
     case "ITEM_RELEASE":
@@ -114,9 +105,6 @@ export function getDateRange(inputDate?: Date | string): { start: Date; end: Dat
 /**
  * Queries Day Book entries with full relational joins, flow classification,
  * KPI summary calculation, and optional 50% presentation projection.
- *
- * @param filter Query filters (date, eventType, accountId, sortOrder)
- * @param mode Calculation mode (NORMAL or FIFTY_PERCENT) for presentation
  */
 export async function getDayBookEntries(
   filter: DayBookFilter = {},
@@ -124,10 +112,10 @@ export async function getDayBookEntries(
 ): Promise<DayBookResult> {
   const { start, end, dateStr } = getDateRange(filter.date);
 
-  const where: Prisma.LedgerEntryWhereInput = {
+  const where: any = {
     createdAt: {
-      gte: start,
-      lte: end,
+      [Op.gte]: start,
+      [Op.lte]: end,
     },
   };
 
@@ -143,53 +131,49 @@ export async function getDayBookEntries(
     }
   }
 
-  const rawEntries = await prisma.ledgerEntry.findMany({
+  const rawEntries = await LedgerEntry.findAll({
     where,
-    orderBy: {
-      createdAt: filter.sortOrder ?? "asc",
-    },
-    include: {
-      loan: {
-        select: {
-          id: true,
-          loanNumber: true,
-          customerId: true,
-          customer: {
-            select: {
-              id: true,
-              fullName: true,
-              phone: true,
-            },
+    order: [["createdAt", (filter.sortOrder ?? "asc").toUpperCase()]],
+    include: [
+      {
+        model: Loan,
+        as: "loan",
+        attributes: ["id", "loanNumber", "customerId"],
+        include: [
+          {
+            model: Customer,
+            as: "customer",
+            attributes: ["id", "fullName", "phone"],
           },
-        },
+        ],
       },
-      account: {
-        select: {
-          id: true,
-          code: true,
-          name: true,
-          type: true,
-        },
+      {
+        model: AccountMaster,
+        as: "account",
+        attributes: ["id", "code", "name", "type"],
       },
-    },
+    ],
   });
 
   // Calculate 100% true KPIs
-  let totalInflow = new Prisma.Decimal(0);
-  let totalOutflow = new Prisma.Decimal(0);
+  let totalInflow = new Decimal(0);
+  let totalOutflow = new Decimal(0);
   let paymentCount = 0;
   let disbursementCount = 0;
   let closureCount = 0;
   let itemReleaseCount = 0;
 
-  const entries: DayBookEntryItem[] = rawEntries.map((row) => {
+  const entries: DayBookEntryItem[] = rawEntries.map((item) => {
+    const row = item.toJSON() as any;
+    const amountDec = new Decimal(row.amount ?? 0);
+    const principalAfterDec = new Decimal(row.principalAfter ?? 0);
     const flow = classifyFlow(row.type);
 
     if (row.type === "PAYMENT") {
-      totalInflow = totalInflow.plus(row.amount);
+      totalInflow = totalInflow.plus(amountDec);
       paymentCount++;
     } else if (row.type === "DISBURSEMENT") {
-      totalOutflow = totalOutflow.plus(row.amount);
+      totalOutflow = totalOutflow.plus(amountDec);
       disbursementCount++;
     } else if (row.type === "CLOSURE") {
       closureCount++;
@@ -197,11 +181,10 @@ export async function getDayBookEntries(
       itemReleaseCount++;
     }
 
-    // Apply presentation projection if in FIFTY_PERCENT mode
     const displayAmount =
-      mode === "FIFTY_PERCENT" ? projectMonetaryDecimal(row.amount, mode) : row.amount;
+      mode === "FIFTY_PERCENT" ? projectMonetaryDecimal(amountDec, mode) : amountDec;
     const displayPrincipalAfter =
-      mode === "FIFTY_PERCENT" ? projectMonetaryDecimal(row.principalAfter, mode) : row.principalAfter;
+      mode === "FIFTY_PERCENT" ? projectMonetaryDecimal(principalAfterDec, mode) : principalAfterDec;
 
     return {
       id: row.id,
@@ -210,23 +193,22 @@ export async function getDayBookEntries(
       flow,
       amount: displayAmount,
       principalAfter: displayPrincipalAfter,
-      loanId: row.loanId,
-      loanNumber: row.loan.loanNumber,
-      customerId: row.loan.customerId,
-      customerName: row.loan.customer.fullName,
-      customerPhone: row.loan.customer.phone,
-      accountId: row.accountId,
+      loanId: row.loanId ?? "",
+      loanNumber: row.loan?.loanNumber ?? "",
+      customerId: row.loan?.customerId ?? "",
+      customerName: row.loan?.customer?.fullName ?? "",
+      customerPhone: row.loan?.customer?.phone ?? "",
+      accountId: row.accountId ?? null,
       accountCode: row.account?.code ?? null,
       accountName: row.account?.name ?? null,
       accountType: row.account?.type ?? null,
-      referenceId: row.referenceId,
+      referenceId: row.referenceId ?? null,
       description: row.description,
     };
   });
 
   const netCashFlow = totalInflow.minus(totalOutflow);
 
-  // Project KPIs for presentation if needed
   const summary: DayBookSummary = {
     totalInflow: mode === "FIFTY_PERCENT" ? projectMonetaryDecimal(totalInflow, mode) : totalInflow,
     totalOutflow: mode === "FIFTY_PERCENT" ? projectMonetaryDecimal(totalOutflow, mode) : totalOutflow,

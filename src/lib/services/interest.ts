@@ -11,17 +11,18 @@
  *   accruedInterest = dailyInterest × daysBetween(lastSettledDate, asOfDate)
  */
 
-import { Prisma } from "@prisma/client";
-import { differenceInCalendarDays } from "date-fns";
+import Decimal from "decimal.js";
+import { differenceInCalendarDays, addMonths } from "date-fns";
 import { debugLog } from "@/lib/debug";
-
-const Decimal = Prisma.Decimal;
-type Decimal = Prisma.Decimal;
+import type { LoanType, CumulativeFrequency, CumulativeTreatment } from "@/lib/db";
 
 export interface LoanForInterest {
   principalOutstanding: Decimal;
   interestRateMonthly: Decimal;
   lastSettledDate: Date;
+  loanType?: LoanType | "STANDARD" | "CUMULATIVE";
+  cumulativeFrequency?: CumulativeFrequency | "MONTHLY" | "QUARTERLY" | "HALF_YEARLY" | "YEARLY" | null;
+  cumulativeTreatment?: CumulativeTreatment | "ADD_TO_CAPITAL" | "KEEP_SEPARATE" | null;
 }
 
 /**
@@ -45,28 +46,83 @@ export function computeMonthlyInterest(
 }
 
 /**
+ * Helper to get number of months in a compounding/accumulation cycle.
+ */
+function getCycleMonths(frequency?: string | null): number {
+  switch (frequency) {
+    case "MONTHLY": return 1;
+    case "QUARTERLY": return 3;
+    case "HALF_YEARLY": return 6;
+    case "YEARLY": return 12;
+    default: return 1;
+  }
+}
+
+/**
  * Accrued interest from lastSettledDate to asOfDate.
- * Uses Actual/365 day-count convention with day-count-precise proration.
- *
- * accruedInterest = dailyInterest × days
- * Rounded to 2 decimal places.
+ * Supports:
+ * 1. STANDARD loans: Flat rate (simple interest) method, Actual/365 day-count convention.
+ * 2. CUMULATIVE loans:
+ *    - ADD_TO_CAPITAL: Interest accumulates and compounds into principal at each cycle point.
+ *    - KEEP_SEPARATE: Interest accumulates across cycles without compounding principal.
  */
 export function computeAccruedInterest(loan: LoanForInterest, asOfDate: Date): Decimal {
-  const days = differenceInCalendarDays(asOfDate, loan.lastSettledDate);
+  const totalDays = differenceInCalendarDays(asOfDate, loan.lastSettledDate);
 
-  // No interest if date is same or before lastSettledDate
-  if (days <= 0) {
+  if (totalDays <= 0) {
     return new Decimal(0);
   }
 
-  const dailyInterest = computeDailyInterest(loan.principalOutstanding, loan.interestRateMonthly);
+  // Handle Standard Simple Interest
+  if (loan.loanType !== "CUMULATIVE") {
+    const dailyInterest = computeDailyInterest(loan.principalOutstanding, loan.interestRateMonthly);
+    const accrued = dailyInterest.times(new Decimal(totalDays)).toDecimalPlaces(2);
+    debugLog(
+      "interest",
+      `[Standard] accrued=${accrued.toString()} principal=${loan.principalOutstanding.toString()} rate=${loan.interestRateMonthly.toString()}%/mo days=${totalDays}`
+    );
+    return accrued;
+  }
 
-  const accrued = dailyInterest.times(new Decimal(days)).toDecimalPlaces(2);
+  // Handle Cumulative Interest
+  const cycleMonths = getCycleMonths(loan.cumulativeFrequency);
+  const isAddToCapital = loan.cumulativeTreatment === "ADD_TO_CAPITAL";
+
+  let currentDate = new Date(loan.lastSettledDate);
+  let currentPrincipal = new Decimal(loan.principalOutstanding);
+  let totalAccrued = new Decimal(0);
+
+  // Advance period-by-period
+  let nextCycleDate = addMonths(currentDate, cycleMonths);
+  while (nextCycleDate <= asOfDate) {
+    const daysInCycle = differenceInCalendarDays(nextCycleDate, currentDate);
+    if (daysInCycle > 0) {
+      const daily = computeDailyInterest(currentPrincipal, loan.interestRateMonthly);
+      const cycleInterest = daily.times(new Decimal(daysInCycle)).toDecimalPlaces(2);
+      totalAccrued = totalAccrued.plus(cycleInterest);
+
+      if (isAddToCapital) {
+        currentPrincipal = currentPrincipal.plus(cycleInterest);
+      }
+    }
+    currentDate = nextCycleDate;
+    nextCycleDate = addMonths(currentDate, cycleMonths);
+  }
+
+  // Remaining partial cycle days up to asOfDate
+  const remainingDays = differenceInCalendarDays(asOfDate, currentDate);
+  if (remainingDays > 0) {
+    const daily = computeDailyInterest(currentPrincipal, loan.interestRateMonthly);
+    const partialInterest = daily.times(new Decimal(remainingDays)).toDecimalPlaces(2);
+    totalAccrued = totalAccrued.plus(partialInterest);
+  }
+
+  const roundedTotal = totalAccrued.toDecimalPlaces(2);
   debugLog(
     "interest",
-    `accrued=${accrued.toString()} principal=${loan.principalOutstanding.toString()} rate=${loan.interestRateMonthly.toString()}%/mo days=${days}`
+    `[Cumulative:${loan.cumulativeTreatment || "KEEP_SEPARATE"}] accrued=${roundedTotal.toString()} finalPrincipal=${currentPrincipal.toString()} days=${totalDays}`
   );
-  return accrued;
+  return roundedTotal;
 }
 
 /**
@@ -84,5 +140,8 @@ export function computeInterestSummary(loan: LoanForInterest, asOfDate: Date = n
     monthlyInterest: monthly.toDecimalPlaces(2),
     daysSinceSettled,
     lastSettledDate: loan.lastSettledDate,
+    loanType: loan.loanType || "STANDARD",
+    cumulativeFrequency: loan.cumulativeFrequency || null,
+    cumulativeTreatment: loan.cumulativeTreatment || null,
   };
 }
