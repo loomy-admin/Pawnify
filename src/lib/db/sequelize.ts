@@ -20,10 +20,20 @@ function createSequelizeInstance(): Sequelize {
       },
       dialectOptions: {
         decimalNumbers: true,
+        ...(process.env.MYSQL_SSL === "true" || (databaseUrl && databaseUrl.includes("ssl"))
+          ? {
+              ssl: {
+                rejectUnauthorized: process.env.MYSQL_SSL_REJECT_UNAUTHORIZED === "true",
+              },
+            }
+          : {}),
       },
       logging: process.env.DEBUG === "true" ? console.log : false,
     });
   }
+
+  const useSsl =
+    process.env.MYSQL_SSL === "true" || process.env.MYSQL_HOST?.includes("aivencloud.com") || process.env.MYSQL_HOST?.includes("tidbcloud.com");
 
   return new Sequelize(
     process.env.MYSQL_DATABASE || "pawnify_db",
@@ -42,6 +52,13 @@ function createSequelizeInstance(): Sequelize {
       },
       dialectOptions: {
         decimalNumbers: true,
+        ...(useSsl
+          ? {
+              ssl: {
+                rejectUnauthorized: process.env.MYSQL_SSL_REJECT_UNAUTHORIZED === "true",
+              },
+            }
+          : {}),
       },
       logging: process.env.DEBUG === "true" ? console.log : false,
     }
