@@ -7,9 +7,13 @@ import {
   RecordPaymentModal,
   CloseLoanButton,
   ReleaseItemsButton,
-  PawnTicketPrintButton,
+  PrintPaymentReceiptButton,
   ItemPhotoPreview,
+  ApproveLoanButton,
+  DisburseLoanButton,
+  CancelDraftButton,
 } from "./loan-actions-client";
+import { PawnTicketModal } from "@/components/pawn-ticket-modal";
 import { LoanCrudButtons } from "./loan-crud-buttons";
 import {
   AlertTriangle,
@@ -23,14 +27,17 @@ import {
   TrendingDown,
   Lock,
   Loader2,
+  Clock,
+  Coins,
 } from "lucide-react";
 
 interface LoanDetailClientProps {
   id: string;
   isAdmin: boolean;
+  isManager?: boolean;
 }
 
-export function LoanDetailClient({ id, isAdmin }: LoanDetailClientProps) {
+export function LoanDetailClient({ id, isAdmin, isManager = false }: LoanDetailClientProps) {
   const { data: loan, isLoading, isError } = useGetLoanByIdQuery(id);
 
   if (isLoading) {
@@ -111,17 +118,30 @@ export function LoanDetailClient({ id, isAdmin }: LoanDetailClientProps) {
                   ? "badge-active"
                   : loan.displayStatus === "OVERDUE"
                     ? "badge-overdue"
-                    : "badge-closed"
+                    : loan.displayStatus === "DRAFT"
+                      ? "bg-amber-500/15 text-amber-500 border border-amber-500/30"
+                      : loan.displayStatus === "APPROVED"
+                        ? "bg-sky-500/15 text-sky-400 border border-sky-500/30"
+                        : "badge-closed"
               }`}
             >
+              {loan.displayStatus === "DRAFT" && <Clock className="w-3.5 h-3.5" />}
+              {loan.displayStatus === "APPROVED" && <ShieldCheck className="w-3.5 h-3.5" />}
               {loan.displayStatus === "OVERDUE" && <AlertTriangle className="w-3.5 h-3.5" />}
               {loan.displayStatus === "CLOSED" && <CheckCircle2 className="w-3.5 h-3.5" />}
               {loan.displayStatus}
             </span>
           </div>
           <p className="mt-1 text-sm text-(--text-secondary)">
-            Disbursed on {formatDate(loan.loanDate)} by {loan.handledBy.name} • Maturity:{" "}
-            {formatDate(loan.dueDate)}
+            {loan.status === "DRAFT" ? (
+              <span>Draft pledge created by {loan.handledBy.name} • <strong className="text-amber-500">Awaiting Manager Approval</strong></span>
+            ) : loan.status === "APPROVED" ? (
+              <span>Approved by manager • <strong className="text-sky-400">Ready for Cash Disbursal</strong></span>
+            ) : loan.status === "CANCELLED" ? (
+              <span className="text-red-400">Application cancelled before disbursal</span>
+            ) : (
+              <span>Disbursed on {formatDate(loan.disbursedAt || loan.loanDate)} by {loan.handledBy.name} • Maturity: {formatDate(loan.dueDate)}</span>
+            )}
           </p>
         </div>
 
@@ -132,20 +152,54 @@ export function LoanDetailClient({ id, isAdmin }: LoanDetailClientProps) {
             initialNotes={loan.notes || ""}
             canDelete={isAdmin}
           />
-          <PawnTicketPrintButton />
+          <PawnTicketModal loan={loan as any} />
 
+          {/* DRAFT STATE: Approve Loan & Cancel Draft */}
+          {loan.status === "DRAFT" && (
+            <>
+              <ApproveLoanButton
+                loanId={loan.id}
+                canApprove={isAdmin || isManager}
+              />
+              <CancelDraftButton
+                loanId={loan.id}
+                canCancel={isAdmin || isManager}
+              />
+            </>
+          )}
+
+          {/* APPROVED STATE: Disburse Loan & Cancel Draft */}
+          {loan.status === "APPROVED" && (
+            <>
+              <DisburseLoanButton
+                loanId={loan.id}
+                principalAmount={loan.principalAmount}
+                canDisburse={isAdmin || isManager}
+              />
+              <CancelDraftButton
+                loanId={loan.id}
+                canCancel={isAdmin || isManager}
+              />
+            </>
+          )}
+
+          {/* CLOSED STATE: Release Collateral */}
           <ReleaseItemsButton
             loanId={loan.id}
             isClosed={loan.status === "CLOSED"}
             isReleased={isReleased}
           />
 
+          {/* ACTIVE STATE: Close Loan & Record Payment */}
           {loan.status === "ACTIVE" && (
             <>
               <CloseLoanButton loanId={loan.id} canClose={canClose} reason={closeReason} />
 
               <RecordPaymentModal
                 loanId={loan.id}
+                loanNumber={loan.loanNumber}
+                customerName={loan.customer.fullName}
+                customerPhone={loan.customer.phone}
                 principalOutstanding={principalOutstanding}
                 accruedInterest={accruedInterest}
                 unsettledCharges={unsettledCharges}
@@ -300,6 +354,7 @@ export function LoanDetailClient({ id, isAdmin }: LoanDetailClientProps) {
                       <th>Alloc: Charges</th>
                       <th>Alloc: Interest</th>
                       <th>Alloc: Principal</th>
+                      <th className="text-right">Slip</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -329,6 +384,9 @@ export function LoanDetailClient({ id, isAdmin }: LoanDetailClientProps) {
                         </td>
                         <td className="font-mono text-xs text-(--accent) font-bold">
                           {formatINR(pmt.allocatedPrincipal.toString())}
+                        </td>
+                        <td className="text-right">
+                          <PrintPaymentReceiptButton payment={pmt} loan={loan} />
                         </td>
                       </tr>
                     ))}
@@ -413,11 +471,11 @@ export function LoanDetailClient({ id, isAdmin }: LoanDetailClientProps) {
             <div className="p-3.5 rounded-xl bg-(--bg-tertiary) border border-(--border-primary) text-xs text-(--text-secondary) space-y-1">
               <div className="font-semibold text-(--text-primary) flex items-center gap-1">
                 <TrendingDown className="w-3.5 h-3.5 text-(--accent)" />
-                On-Read Interest Computation (§6.3)
+                Interest Accrual & Repayment Policy
               </div>
               <p className="text-[11px] text-(--text-muted) leading-relaxed">
-                Interest is computed dynamically on read using Actual/365 simple interest formula.
-                Repayments follow atomic waterfall: Charges → Interest → Principal (§6.4).
+                Interest is computed daily on outstanding balance using Actual/365 convention.
+                Repayments support Counter Cash & Bank/UPI with instant printable receipts.
               </p>
             </div>
           </div>

@@ -7,6 +7,9 @@ import {
   releaseItemsAction,
   updateLoanNotesAction,
   deleteLoanAction,
+  approveLoanAction,
+  disburseLoanAction,
+  cancelDraftLoanAction,
 } from "@/app/(app)/loans/[id]/actions";
 import { createLoanAction } from "@/app/(app)/loans/new/actions";
 import type { LoanFilters } from "@/lib/services/loans";
@@ -83,6 +86,39 @@ export const loansApi = api.injectEndpoints({
         "Dashboard",
       ],
     }),
+
+    approveLoan: builder.mutation<
+      { success: boolean; error?: string },
+      { loanId: string; notes?: string }
+    >({
+      query: ({ loanId, notes }) => ({ action: approveLoanAction, args: [loanId, notes] }),
+      invalidatesTags: (_result, _error, { loanId }) => [
+        { type: "Loan", id: loanId },
+        { type: "LoanList", id: "LIST" },
+        "Dashboard",
+      ],
+    }),
+
+    disburseLoan: builder.mutation<{ success: boolean; error?: string }, string>({
+      query: (loanId) => ({ action: disburseLoanAction, args: [loanId] }),
+      invalidatesTags: (_result, _error, loanId) => [
+        { type: "Loan", id: loanId },
+        { type: "LoanList", id: "LIST" },
+        "Dashboard",
+      ],
+    }),
+
+    cancelDraftLoan: builder.mutation<
+      { success: boolean; error?: string },
+      { loanId: string; reason?: string }
+    >({
+      query: ({ loanId, reason }) => ({ action: cancelDraftLoanAction, args: [loanId, reason] }),
+      invalidatesTags: (_result, _error, { loanId }) => [
+        { type: "Loan", id: loanId },
+        { type: "LoanList", id: "LIST" },
+        "Dashboard",
+      ],
+    }),
   }),
 });
 
@@ -95,4 +131,7 @@ export const {
   useReleaseItemsMutation,
   useUpdateLoanNotesMutation,
   useDeleteLoanMutation,
+  useApproveLoanMutation,
+  useDisburseLoanMutation,
+  useCancelDraftLoanMutation,
 } = loansApi;

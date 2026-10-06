@@ -171,6 +171,13 @@ export function DayBookClient() {
               50% Display Mode
             </span>
           )}
+          <Link
+            href="/vouchers"
+            className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl bg-(--accent) text-white hover:opacity-90 transition-opacity"
+          >
+            <Receipt className="w-3.5 h-3.5" />
+            Vouchers
+          </Link>
           <button
             onClick={() => loadData()}
             disabled={isPending}

@@ -21,6 +21,7 @@ import {
   Landmark,
   BookOpen,
   BookMarked,
+  Receipt,
   ChevronRight,
 } from "lucide-react";
 import { authClient } from "@/lib/auth-client";
@@ -243,6 +244,7 @@ export function Sidebar({ user }: SidebarProps) {
     { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
     { label: "Day Book", href: "/day-book", icon: BookOpen },
     { label: "Account Ledger", href: "/account-ledger", icon: BookMarked },
+    { label: "Vouchers", href: "/vouchers", icon: Receipt },
     { label: "Customers", href: "/customers", icon: Users },
     { label: "Loans", href: "/loans", icon: Coins },
     { label: "Accounts", href: "/admin/accounts", icon: Landmark },

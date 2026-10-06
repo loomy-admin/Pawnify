@@ -14,7 +14,15 @@ interface PageProps {
 export default async function LoanDetailPage({ params }: PageProps) {
   const resolvedParams = await params;
   const session = await requireSession();
-  const isAdmin = (session.user as unknown as { role: string }).role === "ADMIN";
+  const role = (session.user as unknown as { role: string }).role;
+  const isAdmin = role === "ADMIN";
+  const isManager = role === "ADMIN" || role === "MANAGER";
 
-  return <LoanDetailClient id={resolvedParams.id} isAdmin={isAdmin} />;
+  return (
+    <LoanDetailClient
+      id={resolvedParams.id}
+      isAdmin={isAdmin}
+      isManager={isManager}
+    />
+  );
 }

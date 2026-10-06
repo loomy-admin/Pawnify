@@ -44,18 +44,39 @@ export async function recordPaymentAction(formData: unknown) {
       auth.calculationMode
     );
 
+    const effectiveMode =
+      parsed.data.mode === "SPLIT"
+        ? (parsed.data.bankAmount > 0 && parsed.data.cashAmount === 0 ? "BANK_TRANSFER" : "CASH")
+        : parsed.data.mode;
+
+    const splitNote =
+      parsed.data.cashAmount > 0 || parsed.data.bankAmount > 0
+        ? `[Split: Cash ₹${parsed.data.cashAmount}, Bank/UPI ₹${parsed.data.bankAmount} | Type: ${parsed.data.paymentType}] `
+        : parsed.data.paymentType && parsed.data.paymentType !== "STANDARD"
+          ? `[Type: ${parsed.data.paymentType}] `
+          : "";
+
+    const fullNotes = (splitNote + (parsed.data.notes || "")).trim();
+
     const pmt = await recordPayment(
       parsed.data.loanId,
       trueAmountPaid,
-      parsed.data.mode,
+      effectiveMode,
       auth.user.id,
-      parsed.data.notes
+      fullNotes || undefined
     );
 
     revalidatePath(`/loans/${parsed.data.loanId}`);
     revalidatePath("/loans");
     revalidatePath("/dashboard");
-    return { success: true, receiptNumber: pmt.receiptNumber };
+    return {
+      success: true,
+      receiptNumber: pmt.receiptNumber,
+      amountPaid: parsed.data.amountPaid,
+      cashAmount: parsed.data.cashAmount,
+      bankAmount: parsed.data.bankAmount,
+      paymentType: parsed.data.paymentType,
+    };
   } catch (err: unknown) {
     console.error("Payment recording error:", err);
     return {
@@ -201,6 +222,82 @@ export async function getPreclosureQuoteAction(loanId: string, asOfDateStr?: str
     return {
       success: false,
       error: err instanceof Error ? err.message : "Failed to compute quote",
+    };
+  }
+}
+
+export async function approveLoanAction(loanId: string, notes?: string) {
+  const auth = await checkAuth();
+  if (!auth.authenticated || !auth.user) {
+    return { success: false, error: "Unauthorized. Please sign in." };
+  }
+  if (auth.user.role !== "ADMIN" && auth.user.role !== "MANAGER") {
+    return { success: false, error: "Forbidden: Only Admin or Manager can approve loans." };
+  }
+
+  try {
+    const { approveLoan } = await import("@/lib/services/loans");
+    await approveLoan(loanId, auth.user.id, notes);
+    revalidatePath(`/loans/${loanId}`);
+    revalidatePath("/loans");
+    revalidatePath("/dashboard");
+    return { success: true };
+  } catch (err: unknown) {
+    console.error("Approve loan error:", err);
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : "Failed to approve loan",
+    };
+  }
+}
+
+export async function disburseLoanAction(loanId: string) {
+  const auth = await checkAuth();
+  if (!auth.authenticated || !auth.user) {
+    return { success: false, error: "Unauthorized. Please sign in." };
+  }
+  if (auth.user.role !== "ADMIN" && auth.user.role !== "MANAGER") {
+    return { success: false, error: "Forbidden: Only Admin or Manager can disburse loans." };
+  }
+
+  try {
+    const { disburseApprovedLoan } = await import("@/lib/services/loans");
+    await disburseApprovedLoan(loanId, auth.user.id);
+    revalidatePath(`/loans/${loanId}`);
+    revalidatePath("/loans");
+    revalidatePath("/dashboard");
+    revalidatePath("/day-book");
+    return { success: true };
+  } catch (err: unknown) {
+    console.error("Disburse loan error:", err);
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : "Failed to disburse loan",
+    };
+  }
+}
+
+export async function cancelDraftLoanAction(loanId: string, reason?: string) {
+  const auth = await checkAuth();
+  if (!auth.authenticated || !auth.user) {
+    return { success: false, error: "Unauthorized. Please sign in." };
+  }
+  if (auth.user.role !== "ADMIN" && auth.user.role !== "MANAGER") {
+    return { success: false, error: "Forbidden: Only Admin or Manager can cancel drafts." };
+  }
+
+  try {
+    const { cancelDraftLoan } = await import("@/lib/services/loans");
+    await cancelDraftLoan(loanId, auth.user.id, reason || "Draft cancelled before disbursement");
+    revalidatePath(`/loans/${loanId}`);
+    revalidatePath("/loans");
+    revalidatePath("/dashboard");
+    return { success: true };
+  } catch (err: unknown) {
+    console.error("Cancel draft error:", err);
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : "Failed to cancel draft",
     };
   }
 }

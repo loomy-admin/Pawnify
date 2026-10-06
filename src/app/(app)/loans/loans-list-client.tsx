@@ -1,6 +1,6 @@
 "use client";
 
-import React, { Suspense } from "react";
+import React, { Suspense, useEffect } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Plus, Search } from "lucide-react";
@@ -13,7 +13,7 @@ function LoansListContent() {
   const searchParams = useSearchParams();
 
   const statusParam =
-    (searchParams.get("status") as "ACTIVE" | "OVERDUE" | "CLOSED" | null) || undefined;
+    (searchParams.get("status") as "DRAFT" | "APPROVED" | "ACTIVE" | "OVERDUE" | "CLOSED" | null) || undefined;
   const search = searchParams.get("search") || "";
   const metalTypeParam = (searchParams.get("metalType") as MetalType | null) || undefined;
 
@@ -30,6 +30,8 @@ function LoansListContent() {
 
   const statusTabs = [
     { label: "All Loans", value: undefined },
+    { label: "Drafts", value: "DRAFT" },
+    { label: "Approved", value: "APPROVED" },
     { label: "Active", value: "ACTIVE" },
     { label: "Overdue Exposure", value: "OVERDUE" },
     { label: "Closed & Released", value: "CLOSED" },
@@ -54,6 +56,14 @@ function LoansListContent() {
     interestRateMonthly: l.interestRateMonthly,
     displayStatus: l.displayStatus,
   }));
+
+  // Console log table data for inspection
+  useEffect(() => {
+    if (data) {
+      console.log("[LoansTable] Raw data from API:", data);
+      console.log("[LoansTable] Formatted rows for table:", formattedLoans);
+    }
+  }, [data, formattedLoans]);
 
   const handleFilterSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();

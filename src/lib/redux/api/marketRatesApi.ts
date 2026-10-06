@@ -1,5 +1,5 @@
 import { api } from "./baseApi";
-import { getMarketRatesAction } from "@/lib/actions/market-rates-actions";
+import { getMarketRatesAction, updateMarketRatesAction } from "@/lib/actions/market-rates-actions";
 
 export type MarketRatesData = Awaited<ReturnType<typeof getMarketRatesAction>>;
 
@@ -9,7 +9,12 @@ export const marketRatesApi = api.injectEndpoints({
       query: () => ({ action: getMarketRatesAction, args: [] }),
       providesTags: ["MarketRate"],
     }),
+    updateMarketRates: builder.mutation<MarketRatesData, { goldRate: number; silverRate: number }>({
+      query: (rates) => ({ action: updateMarketRatesAction, args: [rates] }),
+      invalidatesTags: ["MarketRate", "Dashboard"],
+    }),
   }),
 });
 
-export const { useGetMarketRatesQuery } = marketRatesApi;
+export const { useGetMarketRatesQuery, useUpdateMarketRatesMutation } = marketRatesApi;
+

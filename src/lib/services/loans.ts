@@ -195,18 +195,18 @@ export async function createLoan(input: CreateLoanInput) {
         {
           loanId: loan.id,
           metalType: item.metalType as any,
-          description: item.description,
-          purityLabel: item.purityLabel,
+          description: item.description?.trim() || (item.metalType === "GOLD" ? "Gold Ornament" : "Silver Article"),
+          purityLabel: item.purityLabel?.trim() || (item.metalType === "GOLD" ? "22K" : "Fine"),
           purityPercent: new Decimal(item.purityPercent).toString(),
           grossWeightGrams: new Decimal(item.grossWeightGrams).toString(),
-          stoneWeightGrams: new Decimal(item.stoneWeightGrams).toString(),
+          stoneWeightGrams: new Decimal(item.stoneWeightGrams || 0).toString(),
           netWeightGrams: item.netWeightGrams.toString(),
           fineWeightGrams: item.fineWeightGrams.toString(),
           valuationRatePerGram: new Decimal(item.valuationRatePerGram).toString(),
           assessedValue: item.assessedValue.toString(),
-          packetNumber: item.packetNumber,
-          storageLocation: item.storageLocation,
-          photoUrl: item.photoUrl,
+          packetNumber: item.packetNumber?.trim() || `PKT-${Date.now().toString().slice(-4)}`,
+          storageLocation: item.storageLocation?.trim() || "Main Safe",
+          photoUrl: item.photoUrl || null,
         },
         { transaction: t }
       );
@@ -370,6 +370,10 @@ export async function getLoans(filters: LoanFilters = {}) {
     where.status = "CLOSED";
   } else if (filters.status === "ACTIVE" || filters.status === "OVERDUE") {
     where.status = "ACTIVE";
+  } else if (filters.status === "DRAFT") {
+    where.status = "DRAFT";
+  } else if (filters.status === "APPROVED") {
+    where.status = "APPROVED";
   }
 
   if (filters.customerId) {

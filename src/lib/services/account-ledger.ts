@@ -127,25 +127,25 @@ export async function calculateOpeningBalance(
     return new Decimal(0);
   }
 
-  const [paymentSum, disbursementSum] = await Promise.all([
+  const [inflowSum, outflowSum] = await Promise.all([
     LedgerEntry.sum("amount", {
       where: {
         accountId,
-        type: "PAYMENT",
+        type: { [Op.in]: ["PAYMENT", "CAPITAL_INTRO"] },
         createdAt: { [Op.lt]: startDate },
       },
     }),
     LedgerEntry.sum("amount", {
       where: {
         accountId,
-        type: "DISBURSEMENT",
+        type: { [Op.in]: ["DISBURSEMENT"] },
         createdAt: { [Op.lt]: startDate },
       },
     }),
   ]);
 
-  const priorInflow = new Decimal(paymentSum || 0);
-  const priorOutflow = new Decimal(disbursementSum || 0);
+  const priorInflow = new Decimal(inflowSum || 0);
+  const priorOutflow = new Decimal(outflowSum || 0);
 
   return priorInflow.minus(priorOutflow);
 }
@@ -243,14 +243,22 @@ export async function getAccountLedger(
     const principalAfterDec = new Decimal(row.principalAfter ?? 0);
     const flow = classifyFlow(row.type);
 
-    if (row.type === "PAYMENT") {
+    if (row.type === "PAYMENT" || row.type === "CAPITAL_INTRO") {
       totalInflow = totalInflow.plus(amountDec);
       currentBalance = currentBalance.plus(amountDec);
-      paymentCount++;
+      if (row.type === "PAYMENT") paymentCount++;
     } else if (row.type === "DISBURSEMENT") {
       totalOutflow = totalOutflow.plus(amountDec);
       currentBalance = currentBalance.minus(amountDec);
       disbursementCount++;
+    } else if (row.type === "REVERSAL") {
+      if (flow === "OUTFLOW") {
+        totalOutflow = totalOutflow.plus(amountDec);
+        currentBalance = currentBalance.minus(amountDec);
+      } else {
+        totalInflow = totalInflow.plus(amountDec);
+        currentBalance = currentBalance.plus(amountDec);
+      }
     } else if (row.type === "CLOSURE") {
       closureCount++;
     } else if (row.type === "ITEM_RELEASE") {

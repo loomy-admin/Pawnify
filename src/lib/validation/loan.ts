@@ -1,26 +1,27 @@
 /**
  * Loan & Item Validation Schemas
+ * Non-mandatory permissive entries tailored for Indian pawn broker operations.
  */
 
 import { z } from "zod";
 
 export const loanItemSchema = z
   .object({
-    metalType: z.enum(["GOLD", "SILVER"]),
-    description: z.string().min(1, "Item description is required").max(200),
-    purityLabel: z.string().min(1, "Purity label is required"),
+    metalType: z.enum(["GOLD", "SILVER"]).default("GOLD"),
+    description: z.string().max(255).optional().default("Pledged Item"),
+    purityLabel: z.string().optional().default("22K"),
     purityPercent: z.coerce
       .number()
       .gt(0, "Purity must be greater than 0")
       .lte(100, "Purity cannot exceed 100%"),
     grossWeightGrams: z.coerce.number().gt(0, "Gross weight must be greater than 0"),
-    stoneWeightGrams: z.coerce.number().gte(0, "Stone weight cannot be negative").default(0),
+    stoneWeightGrams: z.coerce.number().gte(0, "Stone weight cannot be negative").optional().default(0),
     valuationRatePerGram: z.coerce.number().gt(0, "Valuation rate must be greater than 0"),
-    packetNumber: z.string().min(1, "Packet number is required"),
-    storageLocation: z.string().min(1, "Storage location is required"),
+    packetNumber: z.string().optional().default(""),
+    storageLocation: z.string().optional().default("Main Safe"),
     photoUrl: z.string().url().optional().or(z.literal("")),
   })
-  .refine((data) => data.stoneWeightGrams < data.grossWeightGrams, {
+  .refine((data) => (data.stoneWeightGrams ?? 0) < data.grossWeightGrams, {
     message: "Stone weight must be less than gross weight",
     path: ["stoneWeightGrams"],
   });
@@ -32,9 +33,9 @@ export const createLoanSchema = z.object({
   items: z.array(loanItemSchema).min(1, "At least one item is required"),
   tenureMonths: z.coerce
     .number()
-    .int()
-    .gte(1, "Tenure must be at least 1 month")
-    .lte(12, "Tenure cannot exceed 12 months (RBI cap)"),
+    .gte(0.5, "Tenure must be positive")
+    .optional()
+    .default(12),
   interestRateMonthly: z.coerce
     .number()
     .gt(0, "Interest rate must be greater than 0")
@@ -42,12 +43,12 @@ export const createLoanSchema = z.object({
   principalAmount: z.coerce.number().gt(0, "Principal amount must be greater than 0"),
   gracePeriodDays: z.coerce
     .number()
-    .int()
     .gte(0)
     .lte(90, "Grace period cannot exceed 90 days")
+    .optional()
     .default(7),
-  processingFee: z.coerce.number().gte(0).optional(),
-  loanType: z.enum(["STANDARD", "CUMULATIVE"]).default("STANDARD"),
+  processingFee: z.coerce.number().gte(0).optional().default(0),
+  loanType: z.enum(["STANDARD", "CUMULATIVE"]).optional().default("STANDARD"),
   cumulativeFrequency: z.enum(["MONTHLY", "QUARTERLY", "HALF_YEARLY", "YEARLY"]).optional(),
   cumulativeTreatment: z.enum(["ADD_TO_CAPITAL", "KEEP_SEPARATE"]).optional(),
   asDraft: z.boolean().optional(),

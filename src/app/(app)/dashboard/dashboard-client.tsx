@@ -2,7 +2,6 @@
 
 import React, { useState, useMemo } from "react";
 import Link from "next/link";
-import { DashboardCharts } from "@/components/dashboard-charts";
 import { useGetDashboardDataQuery } from "@/lib/redux/api/dashboardApi";
 import {
   Coins,
@@ -12,12 +11,11 @@ import {
   Calendar,
   ArrowRight,
   Scale,
-  Percent,
-  BellRing,
   Loader2,
   Filter,
   ArrowDownLeft,
   ArrowUpRight,
+  ShieldAlert,
 } from "lucide-react";
 
 const formatINR = (val: string | number | undefined | null) => {
@@ -49,6 +47,84 @@ const formatDateTime = (dateString: Date | string) => {
 };
 
 type PresetRange = "ALL" | "TODAY" | "WEEK" | "MONTH" | "CUSTOM";
+
+interface DonutSlice {
+  label: string;
+  value: number;
+  color: string;
+}
+
+function SvgDonut({
+  slices,
+  size = 110,
+  strokeWidth = 14,
+  centerLabel,
+  centerSublabel,
+}: {
+  slices: DonutSlice[];
+  size?: number;
+  strokeWidth?: number;
+  centerLabel?: string | number;
+  centerSublabel?: string;
+}) {
+  const total = slices.reduce((acc, s) => acc + s.value, 0);
+  const radius = (size - strokeWidth) / 2;
+  const circumference = 2 * Math.PI * radius;
+
+  let accumulatedPercent = 0;
+
+  return (
+    <div className="relative flex items-center justify-center shrink-0" style={{ width: size, height: size }}>
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="-rotate-90">
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={radius}
+          fill="transparent"
+          stroke="var(--bg-secondary)"
+          strokeWidth={strokeWidth}
+        />
+        {total > 0 &&
+          slices.map((slice, i) => {
+            if (slice.value <= 0) return null;
+            const slicePercent = slice.value / total;
+            const strokeDasharray = `${slicePercent * circumference} ${circumference}`;
+            const strokeDashoffset = -accumulatedPercent * circumference;
+            accumulatedPercent += slicePercent;
+            return (
+              <circle
+                key={i}
+                cx={size / 2}
+                cy={size / 2}
+                r={radius}
+                fill="transparent"
+                stroke={slice.color}
+                strokeWidth={strokeWidth}
+                strokeDasharray={strokeDasharray}
+                strokeDashoffset={strokeDashoffset}
+                strokeLinecap="butt"
+                className="transition-all duration-500 ease-out"
+              />
+            );
+          })}
+      </svg>
+      {(centerLabel !== undefined || centerSublabel !== undefined) && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center text-center pointer-events-none">
+          {centerLabel !== undefined && (
+            <span className="text-base font-extrabold leading-none" style={{ color: "var(--text-primary)" }}>
+              {centerLabel}
+            </span>
+          )}
+          {centerSublabel && (
+            <span className="text-[10px] font-semibold mt-0.5 leading-none" style={{ color: "var(--text-muted)" }}>
+              {centerSublabel}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function DashboardClient() {
   const [preset, setPreset] = useState<PresetRange>("ALL");
@@ -106,8 +182,31 @@ export function DashboardClient() {
 
   const { stats, chartData } = data;
 
-  const goldCount = chartData.metalBreakdown.find((m) => m.name === "Gold Loans")?.count || 0;
-  const silverCount = chartData.metalBreakdown.find((m) => m.name === "Silver Loans")?.count || 0;
+  // Metal Breakdown
+  const goldItem = chartData?.metalBreakdown?.find((m) => m.name.toLowerCase().includes("gold"));
+  const silverItem = chartData?.metalBreakdown?.find((m) => m.name.toLowerCase().includes("silver"));
+  const goldCount = goldItem?.count ?? 0;
+  const silverCount = silverItem?.count ?? 0;
+  const goldValue = goldItem?.value ?? 0;
+  const silverValue = silverItem?.value ?? 0;
+  const totalMetalLoans = goldCount + silverCount;
+
+  // Loan Status Breakdown
+  const activeCount = stats.loanStatusSummary?.active?.count ?? stats.activeCount ?? 0;
+  const overdueCount = stats.loanStatusSummary?.overdue?.count ?? stats.overdueCount ?? 0;
+  const closedCount = stats.loanStatusSummary?.closed?.count ?? stats.closedCount ?? 0;
+  const totalStatusLoans = activeCount + overdueCount + closedCount;
+
+  const statusDonutSlices: DonutSlice[] = [
+    { label: "Active", value: activeCount, color: "#10b981" },
+    { label: "Overdue", value: overdueCount, color: "#ef4444" },
+    { label: "Closed", value: closedCount, color: "#94a3b8" },
+  ];
+
+  const metalDonutSlices: DonutSlice[] = [
+    { label: "Gold", value: goldCount, color: "#B38646" },
+    { label: "Silver", value: silverCount, color: "#94a3b8" },
+  ];
 
   return (
     <div className="space-y-6">
@@ -348,329 +447,201 @@ export function DashboardClient() {
         </div>
       </div>
 
-      {/* Operational Summaries Section (Phase 10C) */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        {/* A. Loan Status Summary */}
-        <div className="glass-card p-5 space-y-3" style={{ borderColor: "var(--border-card)" }}>
-          <div className="flex items-center justify-between pb-2 border-b border-(--border-secondary)">
-            <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
-              Loan Status Summary
-            </span>
-            <span className="text-xs font-bold" style={{ color: "var(--accent-text)" }}>
-              {stats.totalLoansCount ?? stats.activeCount + stats.closedCount} Total
-            </span>
-          </div>
-          <div className="space-y-2 text-xs">
-            <div className="flex items-center justify-between py-1">
-              <div className="flex items-center gap-2">
-                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
-                <span className="font-medium" style={{ color: "var(--text-primary)" }}>Active</span>
-              </div>
-              <div className="text-right">
-                <span className="font-bold">{stats.loanStatusSummary?.active?.count ?? stats.activeCount}</span>
-                <span className="text-[11px] text-(--text-muted) ml-2">
-                  ({formatINR(stats.loanStatusSummary?.active?.amount)})
-                </span>
-              </div>
-            </div>
-            <div className="flex items-center justify-between py-1">
-              <div className="flex items-center gap-2">
-                <span className="w-2.5 h-2.5 rounded-full bg-red-500" />
-                <span className="font-medium text-red-500">Overdue</span>
-              </div>
-              <div className="text-right">
-                <span className="font-bold text-red-500">{stats.loanStatusSummary?.overdue?.count ?? stats.overdueCount}</span>
-                <span className="text-[11px] text-red-400 ml-2">
-                  ({formatINR(stats.loanStatusSummary?.overdue?.amount ?? stats.overdueAmount)})
-                </span>
-              </div>
-            </div>
-            <div className="flex items-center justify-between py-1">
-              <div className="flex items-center gap-2">
-                <span className="w-2.5 h-2.5 rounded-full bg-slate-400" />
-                <span className="font-medium" style={{ color: "var(--text-muted)" }}>Closed</span>
-              </div>
-              <div className="text-right">
-                <span className="font-bold">{stats.loanStatusSummary?.closed?.count ?? stats.closedCount}</span>
-                <span className="text-[11px] text-(--text-muted) ml-2">
-                  ({formatINR(stats.loanStatusSummary?.closed?.amount)})
-                </span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* B. Collections Breakdown */}
-        <div className="glass-card p-5 space-y-3" style={{ borderColor: "var(--border-card)" }}>
-          <div className="flex items-center justify-between pb-2 border-b border-(--border-secondary)">
-            <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
-              Collections Summary
-            </span>
-            <span className="text-xs font-bold text-emerald-600">
-              {stats.collectionsPeriod?.count ?? 0} Receipts
-            </span>
-          </div>
-          <div className="space-y-2 text-xs">
-            <div className="flex items-center justify-between py-1">
-              <span style={{ color: "var(--text-muted)" }}>Principal Realized</span>
-              <span className="font-bold">{formatINR(stats.collectionsSummary?.principalCollected)}</span>
-            </div>
-            <div className="flex items-center justify-between py-1">
-              <span style={{ color: "var(--text-muted)" }}>Interest Realized</span>
-              <span className="font-bold text-emerald-600">{formatINR(stats.collectionsSummary?.interestCollected)}</span>
-            </div>
-            <div className="flex items-center justify-between py-1">
-              <span style={{ color: "var(--text-muted)" }}>Charges Realized</span>
-              <span className="font-bold">{formatINR(stats.collectionsSummary?.chargesCollected)}</span>
-            </div>
-            <div className="flex items-center justify-between pt-1 border-t border-(--border-secondary) font-bold">
-              <span>Total Inflow</span>
-              <span style={{ color: "var(--accent)" }}>
-                {formatINR(stats.collectionsSummary?.totalCollected ?? stats.collectionsToday.amount)}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* C. Disbursement Summary */}
-        <div className="glass-card p-5 space-y-3" style={{ borderColor: "var(--border-card)" }}>
-          <div className="flex items-center justify-between pb-2 border-b border-(--border-secondary)">
-            <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
-              Disbursement Summary
-            </span>
-            <span className="text-xs font-bold text-blue-500">
-              {stats.disbursementSummary?.count ?? stats.disbursedPeriod?.count ?? 0} Loans
-            </span>
-          </div>
-          <div className="space-y-2 text-xs">
-            <div className="flex items-center justify-between py-1">
-              <span style={{ color: "var(--text-muted)" }}>Disbursed in Period</span>
-              <span className="font-bold text-blue-500">
-                {formatINR(stats.disbursementSummary?.totalDisbursed ?? stats.disbursedPeriod?.amount)}
-              </span>
-            </div>
-            <div className="flex items-center justify-between py-1">
-              <span style={{ color: "var(--text-muted)" }}>Disbursed Today</span>
-              <span className="font-medium">{formatINR(stats.disbursedToday?.amount)}</span>
-            </div>
-            <div className="flex items-center justify-between py-1">
-              <span style={{ color: "var(--text-muted)" }}>Disbursed This Week</span>
-              <span className="font-medium">{formatINR(stats.disbursedWeek?.amount)}</span>
-            </div>
-            <div className="flex items-center justify-between pt-1 border-t border-(--border-secondary) font-bold">
-              <span>Lifetime Disbursed</span>
-              <span style={{ color: "var(--text-primary)" }}>
-                {formatINR(stats.portfolioSummary?.totalPrincipalDisbursed)}
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Analytics Charts Section */}
-      <DashboardCharts data={chartData} />
-
-      {/* Shop Balance / Custody Liquidity Section (Octis Reference Style) */}
-      <div className="space-y-3">
-        <div className="flex items-center justify-between px-1">
+      {/* Operational 3-Card Summary Grid (Loan Status, Collections, Metal Loan Distribution) */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 items-stretch">
+        {/* Card 1: Loan Status Summary with Inline SVG Donut Chart */}
+        <div className="glass-card p-5 flex flex-col justify-between" style={{ borderColor: "var(--border-card)" }}>
           <div>
-            <h2 className="text-sm font-bold tracking-tight" style={{ color: "var(--text-primary)" }}>
-              Shop balance
-            </h2>
-            <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-              Total liquidity & collateral custody in shop
-            </p>
+            <div className="flex items-center justify-between pb-3 border-b border-(--border-secondary)">
+              <span className="text-xs font-bold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
+                Loan Status Summary
+              </span>
+              <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-(--bg-secondary) border border-(--border-primary)" style={{ color: "var(--accent-text)" }}>
+                {totalStatusLoans} Total
+              </span>
+            </div>
+
+            {/* Donut Chart & Legend */}
+            <div className="flex items-center gap-4 py-4">
+              <SvgDonut
+                slices={statusDonutSlices}
+                size={110}
+                strokeWidth={14}
+                centerLabel={totalStatusLoans}
+                centerSublabel="Loans"
+              />
+
+              <div className="flex-1 space-y-2 text-xs">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 shrink-0" />
+                    <span className="font-medium" style={{ color: "var(--text-primary)" }}>Active</span>
+                  </div>
+                  <div className="text-right">
+                    <span className="font-bold">{activeCount}</span>
+                    <span className="text-[10px] text-(--text-muted) ml-1.5">
+                      ({formatINR(stats.loanStatusSummary?.active?.amount)})
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-red-500 shrink-0" />
+                    <span className="font-medium text-red-500">Overdue</span>
+                  </div>
+                  <div className="text-right">
+                    <span className="font-bold text-red-500">{overdueCount}</span>
+                    <span className="text-[10px] text-red-400 ml-1.5">
+                      ({formatINR(stats.loanStatusSummary?.overdue?.amount ?? stats.overdueAmount)})
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-slate-400 shrink-0" />
+                    <span className="font-medium" style={{ color: "var(--text-muted)" }}>Closed</span>
+                  </div>
+                  <div className="text-right">
+                    <span className="font-bold">{closedCount}</span>
+                    <span className="text-[10px] text-(--text-muted) ml-1.5">
+                      ({formatINR(stats.loanStatusSummary?.closed?.amount)})
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
-          <span
-            className="text-[11px] px-2.5 py-0.5 rounded-full font-semibold"
-            style={{
-              background: "var(--bg-secondary)",
-              border: "1px solid var(--border-primary)",
-              color: "var(--text-tertiary)",
-            }}
-          >
-            Today
-          </span>
+
+          <div className="pt-2.5 border-t border-(--border-secondary) flex items-center justify-between text-[11px]" style={{ color: "var(--text-muted)" }}>
+            <span>Portfolio Quality</span>
+            <span className="font-semibold text-emerald-600">
+              {totalStatusLoans > 0 ? ((activeCount / totalStatusLoans) * 100).toFixed(0) : 0}% Active Rate
+            </span>
+          </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {/* Cash in Hand */}
-          <div className="glass-card p-4 flex items-center gap-3.5">
-            <div className="w-10 h-10 rounded-xl bg-[#C59A58]/15 text-[#966727] dark:text-[#E4BE85] flex items-center justify-center font-bold shrink-0">
-              <Coins className="w-5 h-5" />
+        {/* Card 2: Collections Summary */}
+        <div className="glass-card p-5 flex flex-col justify-between" style={{ borderColor: "var(--border-card)" }}>
+          <div>
+            <div className="flex items-center justify-between pb-3 border-b border-(--border-secondary)">
+              <span className="text-xs font-bold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
+                Collections Summary
+              </span>
+              <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20">
+                {stats.collectionsPeriod?.count ?? 0} Receipts
+              </span>
             </div>
-            <div className="min-w-0">
-              <div className="text-[10px] font-bold uppercase tracking-wider text-(--text-muted)">
-                CASH IN HAND
+
+            <div className="space-y-3 py-3 text-xs">
+              <div className="flex items-center justify-between py-0.5">
+                <span style={{ color: "var(--text-muted)" }}>Principal Realized</span>
+                <span className="font-bold" style={{ color: "var(--text-primary)" }}>
+                  {formatINR(stats.collectionsSummary?.principalCollected)}
+                </span>
               </div>
-              <div className="text-lg font-extrabold text-(--text-primary)">
-                {formatINR(stats.collectionsSummary?.totalCollected ?? stats.collectionsToday.amount)}
+              <div className="flex items-center justify-between py-0.5">
+                <span style={{ color: "var(--text-muted)" }}>Interest Realized</span>
+                <span className="font-bold text-emerald-600 dark:text-emerald-400">
+                  {formatINR(stats.collectionsSummary?.interestCollected)}
+                </span>
               </div>
-              <div className="text-[11px] text-(--text-tertiary)">Counter cash collections</div>
+              <div className="flex items-center justify-between py-0.5">
+                <span style={{ color: "var(--text-muted)" }}>Charges Realized</span>
+                <span className="font-bold" style={{ color: "var(--text-primary)" }}>
+                  {formatINR(stats.collectionsSummary?.chargesCollected)}
+                </span>
+              </div>
             </div>
           </div>
 
-          {/* Bank / Active Portfolio Asset */}
-          <div className="glass-card p-4 flex items-center gap-3.5">
-            <div className="w-10 h-10 rounded-xl bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 flex items-center justify-center font-bold shrink-0">
-              <TrendingUp className="w-5 h-5" />
-            </div>
-            <div className="min-w-0">
-              <div className="text-[10px] font-bold uppercase tracking-wider text-(--text-muted)">
-                PRINCIPAL RECEIVABLE
-              </div>
-              <div className="text-lg font-extrabold text-(--text-primary)">
-                {formatINR(stats.totalPrincipalOutstanding ?? stats.totalAUM)}
-              </div>
-              <div className="text-[11px] text-(--text-tertiary)">Active portfolio assets</div>
-            </div>
-          </div>
-
-          {/* Pledged Metal Stock */}
-          <div className="glass-card p-4 flex items-center gap-3.5">
-            <div className="w-10 h-10 rounded-xl bg-amber-500/15 text-amber-700 dark:text-amber-400 flex items-center justify-center font-bold shrink-0">
-              <Scale className="w-5 h-5" />
-            </div>
-            <div className="min-w-0">
-              <div className="text-[10px] font-bold uppercase tracking-wider text-(--text-muted)">
-                PLEDGED COLLATERAL
-              </div>
-              <div className="text-lg font-extrabold text-(--text-primary)">
-                {goldCount} Gold / {silverCount} Silver
-              </div>
-              <div className="text-[11px] text-(--text-tertiary)">Pledged jewelry in vault</div>
-            </div>
+          <div className="pt-3 border-t border-(--border-secondary) flex items-center justify-between">
+            <span className="text-xs font-bold uppercase tracking-wider" style={{ color: "var(--text-secondary)" }}>
+              Total Inflow
+            </span>
+            <span className="text-base font-extrabold text-[#B38646]">
+              {formatINR(stats.collectionsSummary?.totalCollected ?? stats.collectionsToday.amount)}
+            </span>
           </div>
         </div>
-      </div>
 
-      {/* Secondary Operational Metrics Grid */}
-      <div>
-        <h2
-          className="text-xs font-semibold uppercase tracking-wider mb-3 px-1"
-          style={{ color: "var(--text-muted)" }}
-        >
-          Key Risk & Collateral Metrics
-        </h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="glass-card p-4 flex items-center gap-4">
-            <div
-              className="w-12 h-12 rounded-xl flex items-center justify-center shrink-0 shadow-inner"
-              style={{
-                background: "var(--accent-bg)",
-                color: "var(--accent-text)",
-                border: "1px solid var(--accent-border)",
-              }}
-            >
-              <Percent className="w-6 h-6" />
+        {/* Card 3: Metal Loan Summary (Gold / Silver Distribution with Inline SVG Donut) */}
+        <div className="glass-card p-5 flex flex-col justify-between" style={{ borderColor: "var(--border-card)" }}>
+          <div>
+            <div className="flex items-center justify-between pb-3 border-b border-(--border-secondary)">
+              <span className="text-xs font-bold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
+                Metal Loan Summary
+              </span>
+              <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/20">
+                {totalMetalLoans} Pledges
+              </span>
             </div>
-            <div>
-              <div className="text-xs font-medium" style={{ color: "var(--text-muted)" }}>
-                Average Portfolio LTV
-              </div>
-              <div className="text-lg font-bold" style={{ color: "var(--text-primary)" }}>
-                {stats.avgLtv}%
-              </div>
-              <div className="text-[11px]" style={{ color: "var(--text-tertiary)" }}>
-                Regulatory ceiling: 75-85%
+
+            {/* Donut Chart & Legend */}
+            <div className="flex items-center gap-4 py-4">
+              <SvgDonut
+                slices={metalDonutSlices}
+                size={110}
+                strokeWidth={14}
+                centerLabel={totalMetalLoans}
+                centerSublabel="Items"
+              />
+
+              <div className="flex-1 space-y-2.5 text-xs">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-[#B38646] shrink-0" />
+                    <span className="font-medium" style={{ color: "var(--text-primary)" }}>Gold Loans</span>
+                  </div>
+                  <div className="text-right">
+                    <span className="font-bold text-[#B38646]">{goldCount}</span>
+                    <span className="text-[10px] text-(--text-muted) ml-1.5">
+                      ({formatINR(goldValue)})
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-slate-400 shrink-0" />
+                    <span className="font-medium" style={{ color: "var(--text-secondary)" }}>Silver Loans</span>
+                  </div>
+                  <div className="text-right">
+                    <span className="font-bold">{silverCount}</span>
+                    <span className="text-[10px] text-(--text-muted) ml-1.5">
+                      ({formatINR(silverValue)})
+                    </span>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
 
-          <div className="glass-card p-4 flex items-center gap-4">
-            <div
-              className="w-12 h-12 rounded-xl flex items-center justify-center shrink-0 shadow-inner"
-              style={{
-                background: "rgba(234, 179, 8, 0.1)",
-                color: "#eab308",
-                border: "1px solid rgba(234, 179, 8, 0.3)",
-              }}
-            >
-              <Scale className="w-6 h-6" />
-            </div>
-            <div>
-              <div className="text-xs font-medium" style={{ color: "var(--text-muted)" }}>
-                Collateral Split
-              </div>
-              <div className="text-lg font-bold" style={{ color: "var(--text-primary)" }}>
-                {goldCount} Gold / {silverCount} Silver
-              </div>
-              <div className="text-[11px]" style={{ color: "var(--text-tertiary)" }}>
-                Active pledge distribution
-              </div>
-            </div>
+          <div className="pt-2.5 border-t border-(--border-secondary) flex items-center justify-between text-[11px]" style={{ color: "var(--text-muted)" }}>
+            <span>Total Assessed Collateral</span>
+            <span className="font-semibold" style={{ color: "var(--text-primary)" }}>
+              {formatINR(goldValue + silverValue)}
+            </span>
           </div>
-
-          <Link
-            href="/followups"
-            className="glass-card p-4 flex items-center gap-4 hover:border-emerald-500/50 transition-all"
-          >
-            <div
-              className="w-12 h-12 rounded-xl flex items-center justify-center shrink-0 shadow-inner"
-              style={{
-                background: "rgba(168, 85, 247, 0.1)",
-                color: "#a855f7",
-                border: "1px solid rgba(168, 85, 247, 0.3)",
-              }}
-            >
-              <BellRing className="w-6 h-6" />
-            </div>
-            <div>
-              <div className="text-xs font-medium" style={{ color: "var(--text-muted)" }}>
-                Pending Reminders
-              </div>
-              <div className="text-lg font-bold" style={{ color: "var(--text-primary)" }}>
-                {stats.pendingFollowUpsCount} tasks
-              </div>
-              <div className="text-[11px]" style={{ color: "var(--accent-text)" }}>
-                Due within 7 days &rarr;
-              </div>
-            </div>
-          </Link>
-
-          <Link
-            href="/loans?status=ACTIVE"
-            className="glass-card p-4 flex items-center gap-4 hover:border-blue-500/50 transition-all"
-          >
-            <div
-              className="w-12 h-12 rounded-xl flex items-center justify-center shrink-0"
-              style={{
-                background: "rgba(59, 130, 246, 0.1)",
-                color: "#2563eb",
-                border: "1px solid rgba(59, 130, 246, 0.3)",
-              }}
-            >
-              <Calendar className="w-6 h-6" />
-            </div>
-            <div>
-              <div className="text-xs font-medium" style={{ color: "var(--text-muted)" }}>
-                Maturity: 30 Days
-              </div>
-              <div className="text-lg font-bold" style={{ color: "var(--text-primary)" }}>
-                {stats.dueIn30Days} loans
-              </div>
-              <div className="text-[11px]" style={{ color: "var(--accent-text)" }}>
-                Upcoming renewal window &rarr;
-              </div>
-            </div>
-          </Link>
         </div>
       </div>
 
-      {/* Main Content Grid: Overdue Attention Table + Recent Activity */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+      {/* Main Content Grid: Overdue Attention Table (Left 2 cols) + Recent Disbursals (Right 1 col) */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-stretch">
         {/* Left 2 Cols: Overdue Loans requiring immediate attention */}
-        <div className="lg:col-span-2 space-y-4">
+        <div className="lg:col-span-2 flex flex-col space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <div className="w-2 h-2 rounded-full bg-red-500 animate-ping" />
-              <h2 className="text-base font-semibold" style={{ color: "var(--text-primary)" }}>
-                Action Required: Overdue Accounts
+              <h2 className="text-sm font-bold flex items-center gap-1.5" style={{ color: "var(--text-primary)" }}>
+                <ShieldAlert className="w-4 h-4 text-red-500" />
+                <span>Action Required: Overdue Accounts</span>
               </h2>
             </div>
             <Link
               href="/loans?status=OVERDUE"
-              className="text-xs font-medium flex items-center gap-1 transition-colors"
+              className="text-xs font-medium flex items-center gap-1 transition-colors hover:underline"
               style={{ color: "var(--accent-text)" }}
             >
               <span>View all ({stats.overdueCount})</span>
@@ -678,19 +649,22 @@ export function DashboardClient() {
             </Link>
           </div>
 
-          <div className="glass-card overflow-hidden">
+          <div
+            className="glass-card flex-1 flex flex-col overflow-hidden max-h-[380px]"
+            style={{ borderColor: "var(--border-card)" }}
+          >
             {stats.overdueLoans.length === 0 ? (
               <div
-                className="p-8 text-center text-sm flex flex-col items-center gap-2"
+                className="p-12 text-center text-sm flex flex-col items-center justify-center gap-2 h-full"
                 style={{ color: "var(--text-muted)" }}
               >
                 <CheckCircle2 className="w-8 h-8 text-emerald-500/50" />
-                <span>No overdue loans currently! All accounts are in good standing.</span>
+                <span>No overdue loans currently. All accounts are in good standing!</span>
               </div>
             ) : (
-              <div className="overflow-x-auto">
+              <div className="overflow-x-auto overflow-y-auto flex-1">
                 <table className="data-table w-full">
-                  <thead>
+                  <thead className="sticky top-0 z-10 bg-(--bg-card) border-b border-(--border-secondary)">
                     <tr>
                       <th>Loan No.</th>
                       <th>Customer</th>
@@ -701,7 +675,7 @@ export function DashboardClient() {
                   </thead>
                   <tbody>
                     {stats.overdueLoans.map((loan) => (
-                      <tr key={loan.id}>
+                      <tr key={loan.id} className="hover:bg-red-500/5 transition-colors">
                         <td className="font-mono text-xs font-medium">
                           <Link
                             href={`/loans/${loan.id}`}
@@ -712,14 +686,14 @@ export function DashboardClient() {
                           </Link>
                         </td>
                         <td>
-                          <div className="font-medium" style={{ color: "var(--text-primary)" }}>
+                          <div className="font-medium text-xs" style={{ color: "var(--text-primary)" }}>
                             {loan.customer.fullName}
                           </div>
-                          <div className="text-xs font-mono" style={{ color: "var(--text-muted)" }}>
+                          <div className="text-[11px] font-mono" style={{ color: "var(--text-muted)" }}>
                             {loan.customer.phone}
                           </div>
                         </td>
-                        <td className="font-semibold text-red-500">
+                        <td className="font-semibold text-xs text-red-500">
                           {formatINR(loan.principalOutstanding.toString())}
                         </td>
                         <td className="text-xs" style={{ color: "var(--text-tertiary)" }}>
@@ -746,14 +720,14 @@ export function DashboardClient() {
         </div>
 
         {/* Right 1 Col: Recent Disbursals */}
-        <div className="space-y-4">
+        <div className="flex flex-col space-y-3">
           <div className="flex items-center justify-between">
-            <h2 className="text-base font-semibold" style={{ color: "var(--text-primary)" }}>
+            <h2 className="text-sm font-bold" style={{ color: "var(--text-primary)" }}>
               Recent Disbursals
             </h2>
             <Link
               href="/loans"
-              className="text-xs font-medium flex items-center gap-1 transition-colors"
+              className="text-xs font-medium flex items-center gap-1 transition-colors hover:underline"
               style={{ color: "var(--accent-text)" }}
             >
               <span>All Loans</span>
@@ -761,69 +735,76 @@ export function DashboardClient() {
             </Link>
           </div>
 
-          <div className="glass-card overflow-hidden" style={{ borderColor: "var(--border-card)" }}>
-            {stats.recentLoans.map((loan, i) => (
-              <Link
-                key={loan.id}
-                href={`/loans/${loan.id}`}
-                className="block p-4 transition-colors hover:bg-black/5 dark:hover:bg-white/5"
-                style={{
-                  borderBottom:
-                    i < stats.recentLoans.length - 1 ? "1px solid var(--border-secondary)" : "none",
-                }}
-              >
-                <div className="flex items-center justify-between mb-1">
-                  <span
-                    className="font-mono text-xs font-medium"
-                    style={{ color: "var(--accent-text)" }}
+          <div
+            className="glass-card flex-1 flex flex-col overflow-hidden max-h-[380px]"
+            style={{ borderColor: "var(--border-card)" }}
+          >
+            {stats.recentLoans.length === 0 ? (
+              <div className="p-8 text-center text-sm text-(--text-muted) flex items-center justify-center h-full">
+                No recent loan disbursals found.
+              </div>
+            ) : (
+              <div className="overflow-y-auto divide-y divide-(--border-secondary) flex-1">
+                {stats.recentLoans.map((loan) => (
+                  <Link
+                    key={loan.id}
+                    href={`/loans/${loan.id}`}
+                    className="block p-3.5 transition-colors hover:bg-black/5 dark:hover:bg-white/5"
                   >
-                    {loan.loanNumber}
-                  </span>
-                  <span
-                    className={`text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase ${
-                      loan.displayStatus === "ACTIVE"
-                        ? "badge-active"
-                        : loan.displayStatus === "OVERDUE"
-                          ? "badge-overdue"
-                          : "badge-closed"
-                    }`}
-                  >
-                    {loan.displayStatus}
-                  </span>
-                </div>
-                <div
-                  className="font-medium text-sm truncate"
-                  style={{ color: "var(--text-primary)" }}
-                >
-                  {loan.customer.fullName}
-                </div>
-                <div
-                  className="flex items-center justify-between mt-2 text-xs"
-                  style={{ color: "var(--text-muted)" }}
-                >
-                  <span>Disbursed: {formatDate(loan.loanDate)}</span>
-                  <span className="font-bold" style={{ color: "var(--text-primary)" }}>
-                    {formatINR(loan.principalAmount.toString())}
-                  </span>
-                </div>
-              </Link>
-            ))}
+                    <div className="flex items-center justify-between mb-1">
+                      <span
+                        className="font-mono text-xs font-bold"
+                        style={{ color: "var(--accent-text)" }}
+                      >
+                        {loan.loanNumber}
+                      </span>
+                      <span
+                        className={`text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase ${
+                          loan.displayStatus === "ACTIVE"
+                            ? "badge-active"
+                            : loan.displayStatus === "OVERDUE"
+                              ? "badge-overdue"
+                              : "badge-closed"
+                        }`}
+                      >
+                        {loan.displayStatus}
+                      </span>
+                    </div>
+                    <div
+                      className="font-medium text-xs truncate"
+                      style={{ color: "var(--text-primary)" }}
+                    >
+                      {loan.customer.fullName}
+                    </div>
+                    <div
+                      className="flex items-center justify-between mt-1.5 text-xs"
+                      style={{ color: "var(--text-muted)" }}
+                    >
+                      <span className="text-[11px]">{formatDate(loan.loanDate)}</span>
+                      <span className="font-bold text-xs" style={{ color: "var(--text-primary)" }}>
+                        {formatINR(loan.principalAmount.toString())}
+                      </span>
+                    </div>
+                  </Link>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>
 
-      {/* Operational Section E: Recent Financial Activity (LedgerEntry single-entry log) */}
-      <div className="space-y-4">
+      {/* Operational Section: Recent Financial Activity (Single-Entry Audit Log) */}
+      <div className="space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Coins className="w-4 h-4" style={{ color: "var(--accent)" }} />
-            <h2 className="text-base font-semibold" style={{ color: "var(--text-primary)" }}>
+            <h2 className="text-sm font-bold" style={{ color: "var(--text-primary)" }}>
               Recent Financial Activity (Single-Entry Audit Log)
             </h2>
           </div>
           <Link
             href="/reports?tab=transactions"
-            className="text-xs font-medium flex items-center gap-1 transition-colors"
+            className="text-xs font-medium flex items-center gap-1 transition-colors hover:underline"
             style={{ color: "var(--accent-text)" }}
           >
             <span>Full Transaction History</span>
@@ -837,9 +818,9 @@ export function DashboardClient() {
               No financial activity recorded yet.
             </div>
           ) : (
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto max-h-[360px] overflow-y-auto">
               <table className="data-table w-full">
-                <thead>
+                <thead className="sticky top-0 z-10 bg-(--bg-card) border-b border-(--border-secondary)">
                   <tr>
                     <th>Date & Time</th>
                     <th>Type</th>
@@ -883,7 +864,7 @@ export function DashboardClient() {
                       </td>
                       <td className="font-mono text-xs font-medium">
                         <Link
-                          href={`/loans/${act.loanNumber}`}
+                          href={`/loans/${(act as any).loanId || act.loanNumber}`}
                           className="hover:underline font-bold"
                           style={{ color: "var(--accent-text)" }}
                         >

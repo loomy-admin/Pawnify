@@ -550,3 +550,41 @@ html.dark .dialog-overlay {
     padding: 1rem;
   }
 }
+
+/* ==================== Professional Print Styles ==================== */
+@media print {
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+    font-size: 12pt;
+  }
+
+  .no-print,
+  nav,
+  aside,
+  header,
+  button,
+  .print\:hidden {
+    display: none !important;
+  }
+
+  .print-only {
+    display: block !important;
+  }
+
+  .print-slip-container {
+    background: #ffffff !important;
+    color: #000000 !important;
+    box-shadow: none !important;
+    border: none !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  @page {
+    margin: 1cm;
+    size: auto;
+  }
+}
+

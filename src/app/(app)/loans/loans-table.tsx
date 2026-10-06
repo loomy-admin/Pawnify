@@ -4,7 +4,7 @@ import React from "react";
 import Link from "next/link";
 import { ColumnDef } from "@tanstack/react-table";
 import { DataTable } from "@/components/ui/data-table";
-import { Scale, AlertTriangle, CheckCircle2, ArrowRight, Plus } from "lucide-react";
+import { Scale, AlertTriangle, CheckCircle2, ArrowRight, Plus, Clock, ShieldCheck } from "lucide-react";
 
 export interface LoanRowData {
   id: string;
@@ -168,9 +168,15 @@ export function LoansTable({ data, isLoading = false }: LoansTableProps) {
                 ? "badge-active"
                 : l.displayStatus === "OVERDUE"
                   ? "badge-overdue"
-                  : "badge-closed"
+                  : l.displayStatus === "DRAFT"
+                    ? "bg-amber-500/15 text-amber-500 border border-amber-500/30"
+                    : l.displayStatus === "APPROVED"
+                      ? "bg-sky-500/15 text-sky-400 border border-sky-500/30"
+                      : "badge-closed"
             }`}
           >
+            {l.displayStatus === "DRAFT" && <Clock className="w-3 h-3" />}
+            {l.displayStatus === "APPROVED" && <ShieldCheck className="w-3 h-3" />}
             {l.displayStatus === "OVERDUE" && <AlertTriangle className="w-3 h-3" />}
             {l.displayStatus === "CLOSED" && <CheckCircle2 className="w-3 h-3" />}
             {l.displayStatus}
