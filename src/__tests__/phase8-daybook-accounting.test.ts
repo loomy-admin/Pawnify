@@ -68,8 +68,8 @@ function trackSetting(key: string) {
 }
 
 beforeAll(async () => {
-  // Find a test loan
-  const loan = await Loan.findOne({ attributes: ["id"] });
+  // Find an active test loan for waterfall testing
+  const loan = (await Loan.findOne({ where: { status: "ACTIVE" }, attributes: ["id"] })) || (await Loan.findOne({ attributes: ["id"] }));
   if (!loan) throw new Error("No loan found in DB");
   testLoanId = loan.id;
 

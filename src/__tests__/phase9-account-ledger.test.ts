@@ -60,8 +60,8 @@ function trackAccount(id: string) {
 
 describe("Phase 9: Account Ledger Service & Dynamic Balance Tests", () => {
   beforeAll(async () => {
-    // 1. Pick an existing loan for test entries
-    const loan = await Loan.findOne({ attributes: ["id"] });
+    // 1. Pick an active loan for test entries
+    const loan = (await Loan.findOne({ where: { status: "ACTIVE" }, attributes: ["id"] })) || (await Loan.findOne({ attributes: ["id"] }));
     if (!loan) throw new Error("A loan must exist in the database for tests.");
     testLoanId = loan.id;
 
