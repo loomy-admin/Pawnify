@@ -8,6 +8,7 @@ import {
   CloseLoanButton,
   ReleaseItemsButton,
   PrintPaymentReceiptButton,
+  ReversePaymentButton,
   ItemPhotoPreview,
   ApproveLoanButton,
   DisburseLoanButton,
@@ -210,6 +211,64 @@ export function LoanDetailClient({ id, isAdmin, isManager = false }: LoanDetailC
         </div>
       </div>
 
+      {/* Top 3 KPI Financial Summary Cards (Point 6: Borrowing Cost Engine) */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+        {/* Card 1: Accrued Interest */}
+        <div className="kpi-card p-5 border-(--border-primary) flex items-center justify-between">
+          <div>
+            <div className="text-xs font-semibold text-(--text-secondary) uppercase tracking-wider mb-1">
+              Accrued Interest
+            </div>
+            <div className="text-2xl font-black font-mono text-(--accent)">
+              {formatINR(accruedInterest)}
+            </div>
+            <div className="text-[11px] text-(--text-muted) mt-1">
+              {loan.interestRateMonthly.toString()}% p.m. • Since {formatDate(loan.lastSettledDate)}
+            </div>
+          </div>
+          <div className="w-12 h-12 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-500 shrink-0">
+            <TrendingDown className="w-6 h-6" />
+          </div>
+        </div>
+
+        {/* Card 2: Principal Outstanding */}
+        <div className="kpi-card p-5 border-(--border-primary) flex items-center justify-between">
+          <div>
+            <div className="text-xs font-semibold text-(--text-secondary) uppercase tracking-wider mb-1">
+              Principal Outstanding
+            </div>
+            <div className="text-2xl font-black font-mono text-(--text-primary)">
+              {formatINR(principalOutstanding)}
+            </div>
+            <div className="text-[11px] text-(--text-muted) mt-1">
+              {loan.status === "APPROVED" || loan.status === "DRAFT" ? "Sanctioned: " : "Original: "}
+              {formatINR(loan.principalAmount.toString())}
+            </div>
+          </div>
+          <div className="w-12 h-12 rounded-xl bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-sky-400 shrink-0">
+            <Coins className="w-6 h-6" />
+          </div>
+        </div>
+
+        {/* Card 3: Total Due Today */}
+        <div className="kpi-card p-5 border-(--accent-border) bg-(--accent)/5 flex items-center justify-between">
+          <div>
+            <div className="text-xs font-semibold text-(--accent) uppercase tracking-wider mb-1">
+              Total Due Today
+            </div>
+            <div className="text-2xl font-black font-mono text-(--accent)">
+              {formatINR(totalDue)}
+            </div>
+            <div className="text-[11px] text-(--text-muted) mt-1">
+              {unsettledCharges > 0 ? `Includes ${formatINR(unsettledCharges)} charges` : "Principal + Accrued Interest"}
+            </div>
+          </div>
+          <div className="w-12 h-12 rounded-xl bg-(--accent-bg) border border-(--accent-border) flex items-center justify-center text-(--accent) shrink-0">
+            <Wallet className="w-6 h-6" />
+          </div>
+        </div>
+      </div>
+
       {/* Main Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-8">
         {/* Left 2 Cols: Customer Profile & Collateral Items */}
@@ -386,7 +445,17 @@ export function LoanDetailClient({ id, isAdmin, isManager = false }: LoanDetailC
                           {formatINR(pmt.allocatedPrincipal.toString())}
                         </td>
                         <td className="text-right">
-                          <PrintPaymentReceiptButton payment={pmt} loan={loan} />
+                          <div className="flex items-center justify-end gap-1.5">
+                            <PrintPaymentReceiptButton payment={pmt} loan={loan} />
+                            <ReversePaymentButton
+                              paymentId={pmt.id}
+                              loanId={loan.id}
+                              receiptNumber={pmt.receiptNumber}
+                              amount={pmt.amountPaid.toString()}
+                              isReversed={pmt.isReversed}
+                              canReverse={isAdmin}
+                            />
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -410,7 +479,9 @@ export function LoanDetailClient({ id, isAdmin, isManager = false }: LoanDetailC
             <div className="space-y-3 text-sm">
               <div className="flex items-center justify-between">
                 <span className="text-(--text-secondary) text-xs">
-                  Original Principal Disbursed
+                  {loan.status === "APPROVED" || loan.status === "DRAFT"
+                    ? "Sanctioned Principal Amount"
+                    : "Original Principal Disbursed"}
                 </span>
                 <span className="font-semibold text-(--text-primary)">
                   {formatINR(loan.principalAmount.toString())}

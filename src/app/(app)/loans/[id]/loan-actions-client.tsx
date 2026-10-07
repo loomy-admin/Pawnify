@@ -26,7 +26,9 @@ import {
   Receipt,
   Layers,
   Ban,
+  RotateCcw,
 } from "lucide-react";
+import { reversePaymentAction } from "./actions";
 import {
   Dialog,
   DialogContent,
@@ -316,11 +318,10 @@ export function RecordPaymentModal({
                     key={item.id}
                     type="button"
                     onClick={() => setPaymentType(item.id as any)}
-                    className={`p-2 rounded-lg border text-[11px] font-semibold transition-all cursor-pointer text-center ${
-                      paymentType === item.id
+                    className={`p-2 rounded-lg border text-[11px] font-semibold transition-all cursor-pointer text-center ${paymentType === item.id
                         ? "bg-[#B38646] text-white border-[#B38646] shadow-xs"
                         : "bg-(--bg-card) border-(--border-primary) text-(--text-secondary) hover:text-(--text-primary)"
-                    }`}
+                      }`}
                   >
                     {item.label}
                   </button>
@@ -346,11 +347,10 @@ export function RecordPaymentModal({
                     setBankAmount(0);
                   }
                 }}
-                className={`text-[11px] font-bold px-2.5 py-1 rounded-lg border cursor-pointer transition-all ${
-                  isSplit
+                className={`text-[11px] font-bold px-2.5 py-1 rounded-lg border cursor-pointer transition-all ${isSplit
                     ? "bg-[#B38646] text-white border-[#B38646]"
                     : "bg-(--bg-secondary) border-(--border-primary) text-(--text-secondary)"
-                }`}
+                  }`}
               >
                 {isSplit ? "Enabled" : "Enable Split"}
               </button>
@@ -1043,6 +1043,124 @@ export function CancelDraftButton({ loanId, canCancel }: CancelDraftButtonProps)
             >
               {isLoading ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Ban className="w-4 h-4 mr-1" />}
               Confirm Cancellation
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+interface ReversePaymentButtonProps {
+  paymentId: string;
+  loanId: string;
+  receiptNumber: string;
+  amount: string | number;
+  isReversed?: boolean;
+  canReverse: boolean;
+}
+
+export function ReversePaymentButton({
+  paymentId,
+  loanId,
+  receiptNumber,
+  amount,
+  isReversed,
+  canReverse,
+}: ReversePaymentButtonProps) {
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (isReversed) {
+    return (
+      <span className="text-[10px] px-2 py-0.5 rounded font-mono font-bold bg-red-500/10 text-red-400 border border-red-500/20">
+        REVERSED
+      </span>
+    );
+  }
+
+  if (!canReverse) return null;
+
+  const handleReverse = async () => {
+    if (!reason.trim()) {
+      setError("Please provide a reason for the reversal");
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await reversePaymentAction(paymentId, loanId, reason);
+      if (!res.success) {
+        setError(res.error || "Failed to reverse payment");
+      } else {
+        setOpen(false);
+      }
+    } catch (e: any) {
+      setError(e.message || "Failed to reverse payment");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <>
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => setOpen(true)}
+        className="text-[11px] h-7 px-2 text-red-400 hover:text-red-300 hover:bg-red-500/10 cursor-pointer"
+        title="Admin only: Reverse this posted payment non-destructively"
+      >
+        <RotateCcw className="w-3.5 h-3.5 mr-1" />
+        Reverse
+      </Button>
+
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-base font-bold flex items-center gap-2 text-red-500">
+              <RotateCcw className="w-5 h-5" />
+              <span>Reverse Posted Payment</span>
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="space-y-4 py-2">
+            <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-300">
+              <strong>Golden Rule #5 Enforced:</strong> This transaction will NOT be deleted. A compensating single-entry <strong className="font-mono">REVERSAL</strong> will be posted to the ledger, adjusting shop counter cash and restoring loan principal.
+            </div>
+
+            <div className="text-xs text-(--text-secondary) space-y-1">
+              <div>Receipt: <strong className="font-mono text-(--text-primary)">{receiptNumber}</strong></div>
+              <div>Amount to Reverse: <strong className="font-mono text-red-400">₹{amount}</strong></div>
+            </div>
+
+            <div className="space-y-1.5">
+              <Label className="text-xs font-semibold">Reversal Reason *</Label>
+              <Input
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                placeholder="e.g. Wrong amount entered / cheque bounced / customer dispute"
+                className="text-xs"
+              />
+            </div>
+
+            {error && (
+              <div className="p-2.5 rounded-lg bg-red-500/10 border border-red-500/20 text-red-500 text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{error}</span>
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center justify-end gap-2 pt-2">
+            <Button variant="outline" size="sm" onClick={() => setOpen(false)} disabled={loading}>
+              Cancel
+            </Button>
+            <Button size="sm" variant="destructive" onClick={handleReverse} disabled={loading}>
+              {loading && <Loader2 className="w-4 h-4 animate-spin mr-1" />}
+              Confirm Reversal
             </Button>
           </div>
         </DialogContent>
